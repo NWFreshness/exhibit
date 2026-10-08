@@ -4,6 +4,7 @@ import { requireUser } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 import { isOwner } from "@/lib/tenancy";
 import { assemble } from "@/lib/assembler";
+import { diffToolTables, normalizeLiveRow, type DiffEntry } from "@/lib/diff";
 import { boardLock } from "@/lib/seats";
 import { refreshDraft, adoptSnapshot } from "@/app/actions/policy";
 
@@ -13,6 +14,16 @@ export default async function DraftPage() {
   const snap = await prisma.adoptedSnapshot.findFirst({ where: { districtId: user.districtId }, orderBy: { adoptedAt: "desc" } });
   const stale = snap ? (out.toolHash !== snap.toolHash || out.answersHash !== snap.answersHash) : false;
   const lock = await boardLock(prisma, user.districtId);
+  let moved: DiffEntry[] | null = null;
+  if (snap && stale) {
+    const liveTools = await prisma.districtTool.findMany({
+      where: { districtId: user.districtId },
+      include: { agreements: { orderBy: { createdAt: "desc" } } },
+    });
+    const qRow = await prisma.questionnaireAnswer.findUnique({ where: { districtId: user.districtId } });
+    const answers = (qRow?.answers ?? {}) as { integrityK5?: string | null; integrity68?: string | null; integrity912?: string | null };
+    moved = diffToolTables(snap.toolTable, liveTools.map((t) => normalizeLiveRow(t, answers)));
+  }
 
   async function refresh() { "use server"; await refreshDraft(); }
   async function adopt() { "use server"; await adoptSnapshot(); }
@@ -20,6 +31,15 @@ export default async function DraftPage() {
   return (
     <Shell user={user} title="Policy draft">
       {snap && stale && <div className="alert stale"><b>Working draft is STALE</b> relative to the snapshot of {snap.adoptedAt.toISOString().slice(0, 10)}. <Link href="/snapshot">View snapshot</Link>.</div>}
+      {moved && moved.length > 0 && (
+        <div className="alert stale"><b>What moved since adoption:</b>
+          <ul>{moved.map((m, i) => (
+            <li key={i}>{m.kind === "field"
+              ? <>{m.toolName} — {m.field}: {m.before} → {m.after}</>
+              : <>{m.toolName} — {m.kind === "added" ? "added to the inventory since adoption" : "removed from the inventory since adoption"}</>}</li>
+          ))}</ul>
+        </div>
+      )}
       {snap && !stale && <div className="alert"><b>Draft matches the adopted snapshot.</b></div>}
       {out.missing.length > 0 && <div className="alert error"><b>Missing decisions (named, not generated around):</b> {out.missing.join("; ")}.</div>}
       {lock.locked

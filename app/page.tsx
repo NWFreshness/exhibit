@@ -3,22 +3,32 @@ import { Shell } from "@/app/shell";
 import { requireUser } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 import { assemble } from "@/lib/assembler";
+import { diffToolTables, normalizeLiveRow, type DiffEntry } from "@/lib/diff";
 import { openRequestCount } from "@/lib/requests";
 import { openRenewalCount } from "@/lib/renewals";
 
 export default async function Home() {
   const user = await requireUser();
   const district = await prisma.district.findUniqueOrThrow({ where: { id: user.districtId } });
-  const tools = await prisma.districtTool.findMany({ where: { districtId: user.districtId } });
+  const tools = await prisma.districtTool.findMany({
+    where: { districtId: user.districtId },
+    include: { agreements: { orderBy: { createdAt: "desc" } } },
+  });
   const ai = (s: string) => tools.filter((t) => t.aiStatus === s).length;
   const hold = tools.filter((t) => t.decision === "hold").length;
   const snap = await prisma.adoptedSnapshot.findFirst({
     where: { districtId: user.districtId }, orderBy: { adoptedAt: "desc" },
   });
   let stale = false;
+  let moved: DiffEntry[] | null = null;
   if (snap) {
     const live = await assemble(prisma, user.districtId);
     stale = live.toolHash !== snap.toolHash || live.answersHash !== snap.answersHash;
+    if (stale) {
+      const qRow = await prisma.questionnaireAnswer.findUnique({ where: { districtId: user.districtId } });
+      const answers = (qRow?.answers ?? {}) as { integrityK5?: string | null; integrity68?: string | null; integrity912?: string | null };
+      moved = diffToolTables(snap.toolTable, tools.map((t) => normalizeLiveRow(t, answers)));
+    }
   }
   const openRequests = await openRequestCount(prisma, user.districtId);
   const renewalsDue = await openRenewalCount(prisma, user.districtId);
@@ -38,6 +48,15 @@ export default async function Home() {
         ? <div className="alert stale"><b>Working draft is STALE.</b> Inventory or answers changed after adoption on {snap.adoptedAt.toISOString().slice(0, 10)}. <Link href="/snapshot">View adopted snapshot</Link>.</div>
         : <div className="alert"><b>Adopted snapshot is current.</b> Adopted {snap.adoptedAt.toISOString().slice(0, 10)} by {snap.adoptedBy}. <Link href="/snapshot">View snapshot</Link>.</div>)
         : <div className="alert"><b>No adopted snapshot yet.</b> Work in the <Link href="/draft">draft</Link>; adopt when the council is ready.</div>}
+      {moved && moved.length > 0 && (
+        <div className="alert stale"><b>What moved since adoption:</b>
+          <ul>{moved.map((m, i) => (
+            <li key={i}>{m.kind === "field"
+              ? <>{m.toolName} — {m.field}: {m.before} → {m.after}</>
+              : <>{m.toolName} — {m.kind === "added" ? "added to the inventory since adoption" : "removed from the inventory since adoption"}</>}</li>
+          ))}</ul>
+        </div>
+      )}
       <div className="counts sans">
         <div className="count"><b>{ai("calls_model")}</b><span className="status">Calls a model</span></div>
         <div className="count"><b>{ai("no_model")}</b><span className="status">No model</span></div>
