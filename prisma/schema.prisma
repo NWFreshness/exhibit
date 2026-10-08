@@ -1,0 +1,367 @@
+// Exhibit phase 1 — Prisma schema. Postgres (Neon / Vercel Postgres / local docker).
+// Tenancy rule: every district-owned table carries districtId; all access via lib/tenancy.ts.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model District {
+  id           String              @id @default(cuid())
+  name         String
+  studentMax   Int?
+  state        String              @default("common") // "WA" enables WA clause variants
+  // Login domains for Google/Microsoft. One primary domain required before
+  // district sign-in is enabled for that district.
+  allowedDomains String[]          @default([])
+  createdAt    DateTime            @default(now())
+  users        User[]
+  tools        DistrictTool[]
+  events       DecisionEvent[]
+  agreements   Agreement[]
+  seats        ReviewSeat[]
+  answers      QuestionnaireAnswer?
+  requests     ToolRequest[]
+  invites      Invite[]
+  renewalFlags RenewalFlag[]
+  schools      School[]
+  trainingScripts TrainingScript[]
+  comments     Comment[]
+  drafts       Draft[]
+  snapshots    AdoptedSnapshot[]
+  acks         TrainingAck[]
+}
+
+model User {
+  id         String   @id @default(cuid())
+  email      String   @unique
+  districtId String
+  district   District @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  // owner (council chair / tech director), curriculum, sped, viewer
+  role       String   @default("viewer")
+  emailVerified DateTime?
+  // Building scope for principals (viewer). Null = all buildings.
+  schoolId   String?
+  school     School?  @relation(fields: [schoolId], references: [id])
+  createdAt  DateTime @default(now())
+
+  // Auth.js tables (email magic-link provider)
+  accounts Account[]
+  sessions Session[]
+}
+
+// ---- Auth.js (Prisma adapter, email provider) ----
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ---- Shared catalog. Districts NEVER edit these rows (no write path exists). ----
+model CatalogTool {
+  id               String   @id @default(cuid())
+  name             String
+  vendor           String   @default("")
+  category         String   @default("General")
+  // typical AI status: calls_model | no_model | unknown
+  typicalAiStatus  String   @default("unknown")
+  // Exhibit fields. NULL = Unknown (never invented).
+  callsGenModel    Boolean?
+  whoseModel       String?
+  studentSent      Boolean?
+  usedForTraining  Boolean?
+  retention        String?
+  optOut           String?
+  subprocessors    String?
+  willSignAddendum String?
+  sourceUrl        String?
+  createdAt        DateTime @default(now())
+  districtTools    DistrictTool[]
+}
+
+// ---- District-owned rows (all carry districtId) ----
+model DistrictTool {
+  id              String       @id @default(cuid())
+  districtId      String
+  district        District     @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  catalogToolId   String?
+  catalogTool     CatalogTool? @relation(fields: [catalogToolId], references: [id])
+  rawName         String
+  category        String       @default("General")
+  inUse           Boolean      @default(true)
+  // How the row entered the file: import | manual | request
+  source          String       @default("manual")
+  // AI status: calls_model | no_model | unknown
+  aiStatus        String       @default("unknown")
+  // Local exhibit override (district's own findings). Keys mirror CatalogTool exhibit fields.
+  exhibitOverride Json?
+  agreementStatus String       @default("not_requested") // signed | expired | refused | not_requested
+  // Renewal pass (WS3): end date, named renewal owner, vendor contact for the DPA letter.
+  agreementEndsOn   DateTime?
+  renewalOwnerUserId String?
+  vendorContact     String       @default("")
+  decision        String       @default("hold") // approved | limited | banned | hold
+  rubricFlags     String[]     @default([])
+  notes           String       @default("")
+  decidedBy       String?
+  decidedAt       DateTime?
+  updatedAt       DateTime     @updatedAt
+  events          DecisionEvent[]
+  agreements      Agreement[]
+  requests        ToolRequest[]
+  renewalFlags    RenewalFlag[]
+  comments        Comment[]      @relation("ToolComments")
+
+  @@index([districtId])
+}
+
+model DecisionEvent {
+  id         String       @id @default(cuid())
+  districtId String
+  district   District     @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  toolId     String
+  tool       DistrictTool @relation(fields: [toolId], references: [id], onDelete: Cascade)
+  actor      String
+  fromStatus String
+  toStatus   String
+  createdAt  DateTime     @default(now())
+
+  @@index([districtId])
+}
+
+// Agreement uploads: contracts only. File bytes live in Vercel Blob (blobKey).
+model Agreement {
+  id         String       @id @default(cuid())
+  districtId String
+  district   District     @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  toolId     String?
+  tool       DistrictTool? @relation(fields: [toolId], references: [id], onDelete: Cascade)
+  blobKey    String
+  status     String       @default("not_requested") // signed | expired | refused | not_requested
+  expiresOn  DateTime?
+  uploadedBy String
+  createdAt  DateTime     @default(now())
+
+  @@index([districtId])
+}
+
+// Council review seats. required: technology, teaching, sped. Optional: association, cabinet.
+model ReviewSeat {
+  id             String   @id @default(cuid())
+  districtId     String
+  district       District @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  seat           String   // technology | teaching | sped | association | cabinet
+  required       Boolean  @default(true)
+  signedAt       DateTime?
+  signedBy       String?
+  overrideReason String?
+  // Council-assigned owner of this seat (email). Set by invite or by the owner.
+  assignedEmail  String?
+  createdAt      DateTime @default(now())
+
+  @@unique([districtId, seat])
+}
+
+// Clause library. Adopted text references id+version; free text never enters adopted text
+// unless the owner promotes it here.
+model Clause {
+  id          String
+  version     Int          @default(1)
+  jurisdiction String      @default("common") // common | WA
+  section     String       // tool_approval | discipline | privacy | staff_use | roles | amendment
+  title       String
+  body        String       // may contain {{variables}}
+  createdAt   DateTime     @default(now())
+
+  @@id([id, version])
+}
+
+// District decisions, not prose. One row per district.
+model QuestionnaireAnswer {
+  districtId String   @id
+  district   District @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  answers    Json
+  updatedAt  DateTime @updatedAt
+}
+
+// Comment on a clause id or a DistrictTool id. accept | reject | propose.
+// A free note never changes adopted text; resolution is a separate explicit action.
+model Comment {
+  id         String       @id @default(cuid())
+  districtId String
+  district   District     @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  targetType String       // clause | tool
+  targetId   String
+  tool       DistrictTool? @relation("ToolComments", fields: [toolId], references: [id], onDelete: Cascade)
+  toolId     String?
+  clauseId   String?
+  kind       String       // accept | reject | propose
+  note       String       @default("")
+  proposal   String?      // proposed replacement text (needs owner promotion to matter)
+  status     String       @default("open") // open | accepted | rejected
+  author     String
+  createdAt  DateTime     @default(now())
+
+  @@index([districtId])
+}
+
+// Staff tool request. Free text here is a note — never copied into the exhibit.
+model ToolRequest {
+  id             String       @id @default(cuid())
+  districtId     String
+  district       District     @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  districtToolId String
+  districtTool   DistrictTool @relation(fields: [districtToolId], references: [id], onDelete: Cascade)
+  requesterName  String       @default("")
+  requesterEmail String       @default("")
+  building       String       @default("")
+  intendedUse    String       @default("staff_only") // staff_only | with_students
+  note           String       @default("")
+  createdAt      DateTime     @default(now())
+
+  @@index([districtId])
+}
+
+// Owner-sent invite. Names an email, a role, and optionally a seat. First login
+// with that email (any provider) lands in this district with this role.
+model Invite {
+  id         String    @id @default(cuid())
+  districtId String
+  district   District  @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  email      String
+  role       String    @default("viewer") // owner | curriculum | sped | viewer
+  seat       String?
+  createdBy  String
+  acceptedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([districtId])
+  @@index([email])
+}
+
+// Monthly renewal flags. Rows, not emails. clearedAt is set when the next
+// pass finds the condition resolved; rows are never silently deleted.
+model RenewalFlag {
+  id             String       @id @default(cuid())
+  districtId     String
+  district       District     @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  districtToolId String
+  districtTool   DistrictTool @relation(fields: [districtToolId], references: [id], onDelete: Cascade)
+  reason         String       // ends_soon | expired | still_hold
+  flaggedAt      DateTime     @default(now())
+  clearedAt      DateTime?
+
+  @@index([districtId])
+  @@index([districtToolId])
+}
+
+// AI-written training script for one snapshot. Stored apart from the adopted
+// snapshot, which is never rewritten: regenerating creates a new row.
+model TrainingScript {
+  id         String   @id @default(cuid())
+  districtId String
+  district   District @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  snapshotId String
+  body       String
+  model      String   @default("stub")
+  createdBy  String
+  createdAt  DateTime @default(now())
+
+  @@index([districtId])
+  @@index([snapshotId])
+}
+
+// Working draft: refreshed by the assembler server action (one live row per district).
+model Draft {
+  id         String   @id @default(cuid())
+  districtId String
+  district   District @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  clauseRefs Json     // [{clauseId, version}]
+  toolHash   String
+  answersHash String
+  html       String
+  createdAt  DateTime @default(now())
+
+  @@index([districtId])
+}
+
+// Immutable snapshot. Rows are NEVER updated after creation.
+model AdoptedSnapshot {
+  id          String   @id @default(cuid())
+  districtId  String
+  district    District @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  adoptedAt   DateTime @default(now())
+  adoptedBy   String
+  clauseRefs  Json     // [{clauseId, version}]
+  toolHash    String
+  answersHash String
+  // Answers as they stood at adoption, so guides and letters render from the
+  // snapshot even after the questionnaire moves on. Null on older snapshots.
+  answersJson Json?
+  toolTable   Json
+  html        String
+  exportKey   String?  // Blob key of exported HTML packet
+
+  @@index([districtId])
+}
+
+// School building. Acknowledgments roll up per building.
+model School {
+  id         String   @id @default(cuid())
+  districtId String
+  district   District @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  name       String
+  users      User[]
+  acks       TrainingAck[]
+  createdAt  DateTime @default(now())
+
+  @@index([districtId])
+}
+
+// Staff acknowledgment of the training packet: name + date only.
+model TrainingAck {
+  id         String   @id @default(cuid())
+  districtId String
+  district   District @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  snapshotId String
+  // The building the signer picked. The snapshot id pins what they signed:
+  // regenerating the working draft never rewrites an acknowledgment.
+  schoolId   String?
+  school     School?  @relation(fields: [schoolId], references: [id])
+  name       String
+  createdAt  DateTime @default(now())
+
+  @@index([districtId])
+}

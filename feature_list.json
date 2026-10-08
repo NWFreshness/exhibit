@@ -1,0 +1,88 @@
+{
+"features": [
+{
+"id": "harness",
+"slice": 1,
+"title": "Harness: AGENTS.md, progress.md, feature_list.json, check script",
+"status": "done"
+},
+{
+"id": "schema-seed-tenancy",
+"slice": 2,
+"title": "Prisma schema, seed (15 catalog tools, clauses, Cedar Ridge + 8), tenancy test",
+"status": "done"
+},
+{
+"id": "inventory",
+"slice": 3,
+"title": "Inventory CSV import, catalog match confirm, AI-status column, home counts",
+"status": "done"
+},
+{
+"id": "tool-detail",
+"slice": 4,
+"title": "Tool detail: exhibit, agreement, decision, rubric result, audit line",
+"status": "done"
+},
+{
+"id": "questionnaire",
+"slice": 5,
+"title": "Questionnaire + review seats (tech, teaching, sped required; association, cabinet optional)",
+"status": "done"
+},
+{
+"id": "assembler",
+"slice": 6,
+"title": "Draft assembler, 8 sections, WA note, export gate, empty-inventory honest draft",
+"status": "done"
+},
+{
+"id": "packets",
+"slice": 7,
+"title": "Stakeholder packets, comments on clause/tool, seat sign + owner override, board lock",
+"status": "done"
+},
+{
+"id": "snapshot",
+"slice": 8,
+"title": "Adopt immutable snapshot; post-edit snapshot unchanged + draft stale",
+"status": "done"
+},
+{
+"id": "training",
+"slice": 9,
+"title": "Training packet from snapshot only: principal script, teacher card, acknowledgment; stale banner",
+"status": "done"
+},
+{
+"id": "p2-ws1-requests",
+"slice": "2.1",
+"title": "WS1 teacher tool request: ToolRequest, public/authed forms, open count, stale-on-approve",
+"status": "done"
+},
+{
+"id": "p2-ws2-signin",
+"slice": "2.2",
+"title": "WS2 district-domain sign-in: Google+Entra, allowed domains, invites, council screen",
+"status": "done"
+},
+{
+"id": "p2-ws3-renewals",
+"slice": "2.3",
+"title": "WS3 renewal pass: endsOn/owner/contact, DPA download, monthly cron route, renewals list",
+"status": "done"
+},
+{
+"id": "p2-ws4-buildings",
+"slice": "2.4",
+"title": "WS4 building acknowledgment: School, schoolId on ack, principal rollup, untrained banner",
+"status": "done"
+},
+{
+"id": "p3-guides",
+"slice": "3.1",
+"title": "Per-tool teacher guides from snapshot tools + pinned answers (approved/limited only)",
+"status": "done"
+}
+]
+}
