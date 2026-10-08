@@ -7,6 +7,7 @@ import { assemble } from "@/lib/assembler";
 import { boardLock } from "@/lib/seats";
 import { citationQueueReasons, mergedExhibit } from "@/lib/rubric";
 import { addComment, citeFinding, resolveComment, promoteProposal, signSeat, overrideSeat } from "@/app/actions/policy";
+import { mintRequestToken } from "@/app/actions/requests";
 
 export default async function ReviewPage() {
   const user = await requireUser();
@@ -19,6 +20,7 @@ export default async function ReviewPage() {
   const seats = await prisma.reviewSeat.findMany({ where: { districtId: user.districtId }, orderBy: { seat: "asc" } });
   const lock = await boardLock(prisma, user.districtId);
   const writable = canWrite(user);
+  const owner = isOwner(user);
   const openRequests = await prisma.districtTool.findMany({
     where: { districtId: user.districtId, source: "request", decision: "hold" },
     include: { requests: { orderBy: { createdAt: "asc" } } },
@@ -76,6 +78,13 @@ export default async function ReviewPage() {
     });
   }
 
+  // Requester status tokens (spec 4.6): the owner mints a link for pre-token
+  // rows. The token itself is never displayed here — it belongs to the requester.
+  async function mint(form: FormData) {
+    "use server";
+    await mintRequestToken(String(form.get("requestId") || ""));
+  }
+
   const today = new Date().toISOString().slice(0, 10);
 
   const packet = (title: string, html?: string) =>
@@ -89,7 +98,7 @@ export default async function ReviewPage() {
 
       <h2 id="requests">Open staff requests ({openRequests.length})</h2>
       {openRequests.length ? (
-        <table className="sans"><tr><th>Tool</th><th>Asked by</th><th>Building</th><th>Students?</th><th>Note</th></tr>
+        <table className="sans"><tr><th>Tool</th><th>Asked by</th><th>Building</th><th>Students?</th><th>Note</th><th className="no-print">Status link</th></tr>
           {openRequests.flatMap((t) => t.requests.map((r) => (
             <tr key={r.id}>
               <td><Link href={`/tools/${t.id}`}>{t.rawName}</Link></td>
@@ -97,6 +106,9 @@ export default async function ReviewPage() {
               <td>{r.building || "—"}</td>
               <td>{r.intendedUse === "with_students" ? "Students would use it" : "Staff only"}</td>
               <td>{r.note || "—"}</td>
+              <td className="no-print">{owner ? (r.statusToken ? "issued" : (
+                <form action={mint}><input type="hidden" name="requestId" value={r.id} /><button className="btn secondary" type="submit">Mint link</button></form>
+              )) : "—"}</td>
             </tr>
           )))}
         </table>
