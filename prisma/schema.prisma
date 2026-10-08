@@ -133,6 +133,10 @@ model DistrictTool {
   renewalOwnerUserId String?
   vendorContact     String       @default("")
   decision        String       @default("hold") // approved | limited | banned | hold
+  // Per-tool grade-band overrides (spec 4.5). Null = inherit the questionnaire band.
+  integrityK5Override  String?
+  integrity68Override  String?
+  integrity912Override String?
   rubricFlags     String[]     @default([])
   notes           String       @default("")
   decidedBy       String?
