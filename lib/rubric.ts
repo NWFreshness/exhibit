@@ -158,3 +158,62 @@ export function overrideKeys(override: Record<string, unknown> | null | undefine
   }
   return set;
 }
+
+/** Citation queue (spec 4.1): in-use tools whose merged exhibit blocks a verdict
+ *  for a citable reason — unknown `usedForTraining`, or a signed agreement
+ *  with no `trainingAddressed` finding. Retention / opt-out / subprocessor
+ *  text never qualifies. Pure over the merged exhibit; the caller filters inUse. */
+export type CitationQueueReason = "Training use unknown" | "Agreement silent on training";
+
+export function citationQueueReasons(
+  merged: Pick<MergedExhibit, "usedForTraining" | "agreementAddressesTraining">,
+  agreementStatus: string
+): CitationQueueReason[] {
+  const reasons: CitationQueueReason[] = [];
+  if (merged.usedForTraining === null || merged.usedForTraining === undefined) {
+    reasons.push("Training use unknown");
+  }
+  if (agreementStatus === "signed" && merged.agreementAddressesTraining !== true) {
+    reasons.push("Agreement silent on training");
+  }
+  return reasons;
+}
+
+export function inCitationQueue(
+  merged: Pick<MergedExhibit, "usedForTraining" | "agreementAddressesTraining">,
+  agreementStatus: string
+): boolean {
+  return citationQueueReasons(merged, agreementStatus).length > 0;
+}
+
+/** Citation sources must be fetchable web URLs: http(s) scheme with a host.
+ *  Rejects empty strings, bare hostnames, and javascript:/data:/etc. schemes. */
+export function isCitationUrlValid(url: string): boolean {
+  const v = (url || "").trim();
+  if (!v) return false;
+  try {
+    const u = new URL(v);
+    return (u.protocol === "http:" || u.protocol === "https:") && u.hostname !== "";
+  } catch {
+    return false;
+  }
+}
+
+export type CitationTriple = { citationUrl: string; citationDate: string; citedBy: string };
+
+/** Merge a finding plus its citation triple into the live override. Existing
+ *  override keys (retention text, other findings) are preserved; the citation
+ *  never touches `notes`. */
+export function withCitation(
+  existing: Record<string, unknown> | null | undefined,
+  finding: { usedForTraining?: boolean; trainingAddressed?: boolean },
+  citation: CitationTriple
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...(existing ?? {}) };
+  if (finding.usedForTraining !== undefined) next.usedForTraining = finding.usedForTraining;
+  if (finding.trainingAddressed !== undefined) next.trainingAddressed = finding.trainingAddressed;
+  next.citationUrl = citation.citationUrl;
+  next.citationDate = citation.citationDate;
+  next.citedBy = citation.citedBy;
+  return next;
+}

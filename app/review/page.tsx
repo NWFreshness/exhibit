@@ -5,13 +5,14 @@ import { prisma } from "@/lib/prisma";
 import { canWrite, isOwner } from "@/lib/tenancy";
 import { assemble } from "@/lib/assembler";
 import { boardLock } from "@/lib/seats";
-import { addComment, resolveComment, promoteProposal, signSeat, overrideSeat } from "@/app/actions/policy";
+import { citationQueueReasons, mergedExhibit } from "@/lib/rubric";
+import { addComment, citeFinding, resolveComment, promoteProposal, signSeat, overrideSeat } from "@/app/actions/policy";
 
 export default async function ReviewPage() {
   const user = await requireUser();
   const out = await assemble(prisma, user.districtId);
   const byTitle = Object.fromEntries(out.sections.map((s) => [s.title, s.html]));
-  const tools = await prisma.districtTool.findMany({ where: { districtId: user.districtId }, orderBy: { rawName: "asc" } });
+  const tools = await prisma.districtTool.findMany({ where: { districtId: user.districtId }, include: { catalogTool: true }, orderBy: { rawName: "asc" } });
   const clauses = await prisma.clause.findMany({ orderBy: [{ id: "asc" }, { version: "desc" }] });
   const clauseIds = [...new Map(clauses.map((c) => [c.id, c])).values()];
   const comments = await prisma.comment.findMany({ where: { districtId: user.districtId }, orderBy: { createdAt: "desc" } });
@@ -51,6 +52,32 @@ export default async function ReviewPage() {
     await overrideSeat(String(form.get("seat")), String(form.get("reason") || ""));
   }
 
+  // Citation queue: in-use tools whose merged exhibit is missing usedForTraining
+  // or whose signed agreement is silent on training. District-scoped by the query above.
+  const queue = tools
+    .filter((t) => t.inUse)
+    .map((t) => ({
+      tool: t,
+      reasons: citationQueueReasons(
+        mergedExhibit(t.catalogTool ?? null, (t.exhibitOverride ?? {}) as Record<string, unknown>),
+        t.agreementStatus
+      ),
+    }))
+    .filter((q) => q.reasons.length > 0);
+
+  async function cite(form: FormData) {
+    "use server";
+    await citeFinding({
+      toolId: String(form.get("toolId") || ""),
+      usedForTraining: String(form.get("usedForTraining") || ""),
+      trainingAddressed: String(form.get("trainingAddressed") || ""),
+      citationUrl: String(form.get("citationUrl") || ""),
+      citationDate: String(form.get("citationDate") || ""),
+    });
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+
   const packet = (title: string, html?: string) =>
     html === undefined ? null : (<section><h2>{title}</h2><div dangerouslySetInnerHTML={{ __html: html }} /></section>);
 
@@ -74,6 +101,39 @@ export default async function ReviewPage() {
           )))}
         </table>
       ) : <p className="hint sans">No open requests. Staff can ask from Inventory or the request link.</p>}
+
+      <h2 id="citation-queue">Citation queue ({queue.length})</h2>
+      <p className="hint sans">In-use tools whose merged exhibit blocks a verdict: training use unknown, or a signed agreement silent on training. Citing records the finding plus its source on the district override — never in notes.</p>
+      {queue.length ? (
+        <table className="sans"><tr><th>Tool</th><th>Missing fact</th><th className="no-print">Cite</th></tr>
+          {queue.map(({ tool: t, reasons }) => (
+            <tr key={t.id}>
+              <td><Link href={`/tools/${t.id}`}>{t.rawName}</Link></td>
+              <td>{reasons.join("; ")}</td>
+              <td className="no-print">
+                {writable ? (
+                  <form action={cite}>
+                    <input type="hidden" name="toolId" value={t.id} />
+                    {reasons.includes("Training use unknown") && (
+                      <label>Training use <select name="usedForTraining" defaultValue="">
+                        <option value="">—</option><option value="false">Not used for training</option><option value="true">Used for training</option>
+                      </select></label>
+                    )}
+                    {reasons.includes("Agreement silent on training") && (
+                      <label>Agreement addresses training <select name="trainingAddressed" defaultValue="">
+                        <option value="">—</option><option value="true">Yes, addressed</option><option value="false">No, silent</option>
+                      </select></label>
+                    )}
+                    <label>Source URL <input type="text" name="citationUrl" placeholder="https://…" style={{ width: 220 }} /></label>
+                    <label>Date <input type="date" name="citationDate" defaultValue={today} /></label>
+                    <button className="btn secondary" type="submit">Cite</button>
+                  </form>
+                ) : <span className="hint">Read-only role.</span>}
+              </td>
+            </tr>
+          ))}
+        </table>
+      ) : <p className="hint sans">All clear — every in-use tool has its training facts cited.</p>}
 
       <h2>Your packet ({user.role})</h2>
       {(user.role === "owner") && packet("Technology — tool table and no-training rule", (byTitle["Approved, limited, and prohibited tools"] || "") + (byTitle["Data and privacy"] || ""))}

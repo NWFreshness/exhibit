@@ -3,8 +3,9 @@ import { z } from "zod";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { sessionUser } from "@/lib/session";
-import { canWrite, isOwner } from "@/lib/tenancy";
+import { canWrite, isOwner, scope } from "@/lib/tenancy";
 import { refuseStudentData } from "@/lib/guard";
+import { isCitationUrlValid, withCitation, inCitationQueue, mergedExhibit } from "@/lib/rubric";
 import { assemble, familyLetter, type Answers } from "@/lib/assembler";
 import { boardLock, REQUIRED_SEATS, OPTIONAL_SEATS } from "@/lib/seats";
 import { buildTrainingPacket } from "@/lib/training";
@@ -154,6 +155,74 @@ export async function overrideSeat(seat: string, reason: string): Promise<{ erro
   return {};
 }
 
+// ---- Citations (spec 4.1): one action records the finding value plus the
+// citation triple (source URL, date, actor email) in a single exhibitOverride
+// write. Never touches notes; the actor is the session email, never input.
+const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+
+function parseFindingFlag(v: string | undefined): boolean | undefined | "invalid" {
+  if (v === undefined || v === "") return undefined;
+  if (v === "true") return true;
+  if (v === "false") return false;
+  return "invalid";
+}
+
+export async function citeFinding(input: {
+  toolId: string;
+  usedForTraining?: string;
+  trainingAddressed?: string;
+  citationUrl: string;
+  citationDate?: string;
+}): Promise<{ error?: string; field?: string }> {
+  const user = await sessionUser();
+  if (!user || !canWrite(user)) return { error: "Read-only role." };
+  const toolId = (input.toolId || "").trim().slice(0, 100);
+  if (!toolId) return { error: "Not found." };
+  const usedForTraining = parseFindingFlag(input.usedForTraining);
+  const trainingAddressed = parseFindingFlag(input.trainingAddressed);
+  if (usedForTraining === "invalid" || trainingAddressed === "invalid") {
+    return { error: "Invalid finding value.", field: "finding" };
+  }
+  if (usedForTraining === undefined && trainingAddressed === undefined) {
+    return { error: "Add a finding: training use true/false, or agreement-addressed true/false.", field: "finding" };
+  }
+  const url = (input.citationUrl || "").trim().slice(0, 2000);
+  if (!isCitationUrlValid(url)) {
+    return { error: "Invalid citation URL: must start with http:// or https://.", field: "citationUrl" };
+  }
+  let date = (input.citationDate || "").trim().slice(0, 10);
+  if (!date) date = new Date().toISOString().slice(0, 10);
+  else if (!dateRe.test(date)) return { error: "Citation date must be YYYY-MM-DD.", field: "citationDate" };
+  for (const v of [url, date, user.email]) {
+    const blocked = refuseStudentData(v);
+    if (blocked) return { error: blocked };
+  }
+  // District-scoped lookup: another district's id resolves to the same
+  // generic "Not found." as a missing row, so no existence signal leaks.
+  const tool = await prisma.districtTool.findFirst({
+    where: { id: toolId, ...scope(user) },
+    include: { catalogTool: true },
+  });
+  if (!tool) return { error: "Not found." };
+  if (!tool.inUse) return { error: "Tool is not in the citation queue." };
+  const over = (tool.exhibitOverride ?? {}) as Record<string, unknown>;
+  const merged = mergedExhibit(tool.catalogTool ?? null, over);
+  if (!inCitationQueue(merged, tool.agreementStatus)) {
+    return { error: "Tool is not in the citation queue." };
+  }
+  const next = withCitation(
+    over,
+    {
+      ...(usedForTraining !== undefined ? { usedForTraining } : {}),
+      ...(trainingAddressed !== undefined ? { trainingAddressed } : {}),
+    },
+    { citationUrl: url, citationDate: date, citedBy: user.email }
+  );
+  await prisma.districtTool.update({ where: { id: tool.id }, data: { exhibitOverride: JSON.parse(JSON.stringify(next)) } });
+  revalidatePath("/review");
+  return {};
+}
+
 // ---- Draft + adopt ----
 export async function refreshDraft(): Promise<{ error?: string }> {
   const user = await sessionUser();
@@ -182,10 +251,17 @@ export async function adoptSnapshot(): Promise<{ error?: string; id?: string }> 
       districtId: user.districtId, adoptedBy: user.email,
       clauseRefs: out.clauseRefs, toolHash: out.toolHash, answersHash: out.answersHash,
       answersJson: (qRow?.answers ?? {}) as object,
-      toolTable: JSON.parse(JSON.stringify(tools.map((t) => ({
-        rawName: t.rawName, category: t.category, aiStatus: t.aiStatus,
-        agreementStatus: t.agreementStatus, decision: t.decision, notes: t.notes,
-      })))),
+      toolTable: JSON.parse(JSON.stringify(tools.map((t) => {
+        // Pin the citation triple alongside the row fields so the cited fact
+        // survives exactly as adopted. Older/uncited rows keep nulls: no backfill.
+        const over = (t.exhibitOverride ?? {}) as Record<string, unknown>;
+        const triple = (k: string): string | null => typeof over[k] === "string" ? (over[k] as string) : null;
+        return {
+          rawName: t.rawName, category: t.category, aiStatus: t.aiStatus,
+          agreementStatus: t.agreementStatus, decision: t.decision, notes: t.notes,
+          citationUrl: triple("citationUrl"), citationDate: triple("citationDate"), citedBy: triple("citedBy"),
+        };
+      }))),
       html: out.html,
     },
   });
