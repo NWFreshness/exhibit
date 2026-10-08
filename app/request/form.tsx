@@ -22,7 +22,13 @@ export function RequestFormFields({ districtName }: { districtName?: string }) {
   );
 }
 
-type State = { error?: string; toolId?: string; existing?: boolean } | null;
+type State = { error?: string; toolId?: string; existing?: boolean; statusToken?: string } | null;
+
+function StatusLink({ token }: { token: string }) {
+  return (
+    <div className="alert">Your private status link: <a href={`/request/status/${token}`}>check your request status</a>. Save it — this is the only time it is shown, and no email is sent.</div>
+  );
+}
 
 export function AuthedRequestForm() {
   const [state, action] = useActionState<State, FormData>(async (_s, fd) => {
@@ -39,6 +45,7 @@ export function AuthedRequestForm() {
       <p className="hint sans">Heard about a tool in a building meeting? Send it to the council file instead of email. It lands on hold until reviewed.</p>
       <RequestFormFields />
       {state?.error && <div className="alert error">{state.error}</div>}
+      {state && !state.error && state.statusToken && <StatusLink token={state.statusToken} />}
       {state && !state.error && (
         <div className="alert">{state.existing ? "That tool is already on file — you were added as another asker." : "Request received. It is on hold until the council reviews it."}</div>
       )}
@@ -60,6 +67,7 @@ export function PublicRequestForm({ districtId, districtName }: { districtId: st
     <form action={action} className="sans">
       <RequestFormFields districtName={districtName} />
       {state?.error && <div className="alert error">{state.error}</div>}
+      {state && !state.error && state.statusToken && <StatusLink token={state.statusToken} />}
       {state && !state.error && (
         <div className="alert">{state.existing ? "That tool is already on file — you were added as another asker." : "Request received. The council reviews new requests before anything is approved."}</div>
       )}

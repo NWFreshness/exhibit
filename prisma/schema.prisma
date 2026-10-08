@@ -259,6 +259,8 @@ model ToolRequest {
   building       String       @default("")
   intendedUse    String       @default("staff_only") // staff_only | with_students
   note           String       @default("")
+  // Unguessable status token (spec 4.6). Null on rows created before tokens.
+  statusToken    String?      @unique
   createdAt      DateTime     @default(now())
 
   @@index([districtId])

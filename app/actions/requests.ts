@@ -3,7 +3,8 @@ import { z } from "zod";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { sessionUser } from "@/lib/session";
-import { createToolRequest } from "@/lib/requests";
+import { isOwner } from "@/lib/tenancy";
+import { createToolRequest, mintRequestToken as mintToken } from "@/lib/requests";
 
 const schema = z.object({
   toolName: z.string().min(1).max(200),
@@ -29,7 +30,7 @@ export type RequestForm = {
 };
 
 /** Any signed-in role (owner, curriculum, sped, viewer) may request. */
-export async function submitRequest(input: RequestForm): Promise<{ error?: string; toolId?: string; existing?: boolean }> {
+export async function submitRequest(input: RequestForm): Promise<{ error?: string; toolId?: string; existing?: boolean; statusToken?: string }> {
   const user = await sessionUser();
   if (!user) return { error: "Sign in required." };
   const parsed = schema.safeParse(input);
@@ -44,14 +45,14 @@ export async function submitRequest(input: RequestForm): Promise<{ error?: strin
     revalidatePath("/inventory");
     revalidatePath("/review");
     revalidatePath("/");
-    return { toolId: r.toolId, existing: r.existing };
+    return { toolId: r.toolId, existing: r.existing, statusToken: r.statusToken };
   } catch (e) {
     return { error: friendly(e) };
   }
 }
 
 /** Request-link form: no session. Scoped to the district in the URL only. */
-export async function submitPublicRequest(districtId: string, input: RequestForm): Promise<{ error?: string; existing?: boolean }> {
+export async function submitPublicRequest(districtId: string, input: RequestForm): Promise<{ error?: string; existing?: boolean; statusToken?: string }> {
   const district = await prisma.district.findUnique({ where: { id: districtId } });
   if (!district) return { error: "Unknown district link." };
   const parsed = schema.safeParse(input);
@@ -59,8 +60,23 @@ export async function submitPublicRequest(districtId: string, input: RequestForm
   if (!parsed.data.requesterEmail) return { error: "Your school email is required so the council can follow up." };
   try {
     const r = await createToolRequest(prisma, districtId, { ...parsed.data, actorEmail: parsed.data.requesterEmail });
-    return { existing: r.existing };
+    return { existing: r.existing, statusToken: r.statusToken };
   } catch (e) {
+    return { error: friendly(e) };
+  }
+}
+
+/** Owner-only: mint a fresh status token for one pre-token row. One row per
+ *  call; the old link, if any, stops resolving. Anonymous minting is impossible. */
+export async function mintRequestToken(requestId: string): Promise<{ error?: string }> {
+  const user = await sessionUser();
+  if (!user || !isOwner(user)) return { error: "Owner only." };
+  try {
+    await mintToken(prisma, user.districtId, requestId);
+    revalidatePath("/review");
+    return {};
+  } catch (e) {
+    if (e instanceof Error && e.message === "Not found.") return { error: "Not found." };
     return { error: friendly(e) };
   }
 }

@@ -3,6 +3,7 @@
 // Free text is a note, never exhibit fact. Shared by the authed + public actions
 // and by the tests.
 import type { PrismaClient } from "@prisma/client";
+import { randomBytes } from "crypto";
 import { refuseStudentData } from "./guard";
 
 export type RequestInput = {
@@ -16,7 +17,12 @@ export type RequestInput = {
   actorEmail: string;
 };
 
-export type RequestResult = { toolId: string; requestId: string; existing: boolean };
+export type RequestResult = { toolId: string; requestId: string; existing: boolean; statusToken: string };
+
+/** Unguessable request status token: 256 bits of entropy, hex-encoded. */
+export function newStatusToken(): string {
+  return randomBytes(32).toString("hex");
+}
 
 function norm(name: string): string {
   return name.trim().replace(/\s+/g, " ");
@@ -63,9 +69,10 @@ export async function createToolRequest(
         building: (input.building || "").slice(0, 120),
         intendedUse: intended,
         note: (input.note || "").slice(0, 2000),
+        statusToken: newStatusToken(),
       },
     });
-    return { toolId: existing.id, requestId: req.id, existing: true };
+    return { toolId: existing.id, requestId: req.id, existing: true, statusToken: req.statusToken! };
   }
 
   const catalog = await db.catalogTool.findMany({ select: { id: true, name: true } });
@@ -97,9 +104,46 @@ export async function createToolRequest(
       building: (input.building || "").slice(0, 120),
       intendedUse: intended,
       note: (input.note || "").slice(0, 2000),
+      statusToken: newStatusToken(),
     },
   });
-  return { toolId: tool.id, requestId: req.id, existing: false };
+  return { toolId: tool.id, requestId: req.id, existing: false, statusToken: req.statusToken! };
+}
+
+/** Public status read (spec 4.6, Q4): the token is the scope. Returns only the
+ *  tool name, the linked tool's current decision, and the intended use — never
+ *  the note, the email, or any other request. Null when the token is unknown
+ *  or the linked row is gone. No outbound reads, no session needed. */
+export type RequestStatus = { toolName: string; decision: string; intendedUse: string };
+
+export async function getRequestStatus(
+  db: PrismaClient,
+  token: string
+): Promise<RequestStatus | null> {
+  const t = (token || "").trim();
+  if (!t) return null;
+  const req = await db.toolRequest.findFirst({
+    where: { statusToken: t },
+    include: { districtTool: { select: { rawName: true, decision: true } } },
+  });
+  if (!req || !req.districtTool) return null;
+  return { toolName: req.districtTool.rawName, decision: req.districtTool.decision, intendedUse: req.intendedUse };
+}
+
+/** Owner mint (spec 4.6, Q3): set a fresh token on one pre-token row. Scoped by
+ *  district; another district's id throws the same generic error as missing. */
+export async function mintRequestToken(
+  db: PrismaClient,
+  districtId: string,
+  requestId: string
+): Promise<string> {
+  const id = (requestId || "").trim();
+  if (!id) throw new Error("Not found.");
+  const row = await db.toolRequest.findFirst({ where: { id, districtId } });
+  if (!row) throw new Error("Not found.");
+  const token = newStatusToken();
+  await db.toolRequest.update({ where: { id: row.id }, data: { statusToken: token } });
+  return token;
 }
 
 /** Open requests: request-sourced rows still on hold. */
