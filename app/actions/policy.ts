@@ -6,7 +6,7 @@ import { sessionUser } from "@/lib/session";
 import { canWrite, isOwner, scope } from "@/lib/tenancy";
 import { refuseStudentData } from "@/lib/guard";
 import { isCitationUrlValid, withCitation, inCitationQueue, mergedExhibit } from "@/lib/rubric";
-import { assemble, familyLetter, type Answers } from "@/lib/assembler";
+import { assemble, familyLetter, latestPointerSummary, type Answers } from "@/lib/assembler";
 import { boardLock, REQUIRED_SEATS, OPTIONAL_SEATS } from "@/lib/seats";
 import { buildTrainingPacket } from "@/lib/training";
 import { putBlob } from "@/lib/store";
@@ -243,7 +243,11 @@ export async function adoptSnapshot(): Promise<{ error?: string; id?: string }> 
   if (lock.locked) return { error: `Board packet is locked. ${lock.reason} Sign all required seats or record an owner override with a reason.` };
   const out = await assemble(prisma, user.districtId);
   if (out.gate.length) return { error: `Cannot adopt: ${out.gate.join("; ")}.` };
-  const tools = await prisma.districtTool.findMany({ where: { districtId: user.districtId }, orderBy: { rawName: "asc" } });
+  const tools = await prisma.districtTool.findMany({
+    where: { districtId: user.districtId },
+    orderBy: { rawName: "asc" },
+    include: { agreements: { orderBy: { createdAt: "desc" } } },
+  });
   const district = await prisma.district.findUniqueOrThrow({ where: { id: user.districtId } });
   const qRow = await prisma.questionnaireAnswer.findUnique({ where: { districtId: user.districtId } });
   const snap = await prisma.adoptedSnapshot.create({
@@ -256,10 +260,17 @@ export async function adoptSnapshot(): Promise<{ error?: string; id?: string }> 
         // survives exactly as adopted. Older/uncited rows keep nulls: no backfill.
         const over = (t.exhibitOverride ?? {}) as Record<string, unknown>;
         const triple = (k: string): string | null => typeof over[k] === "string" ? (over[k] as string) : null;
+        // Pin the canonical pointer summary (spec 4.2, Q4): latest Agreement
+        // per tool; nulls when the tool has no agreement. Same shape as the hash.
+        const pointer = latestPointerSummary(t.agreements ?? null);
         return {
           rawName: t.rawName, category: t.category, aiStatus: t.aiStatus,
           agreementStatus: t.agreementStatus, decision: t.decision, notes: t.notes,
           citationUrl: triple("citationUrl"), citationDate: triple("citationDate"), citedBy: triple("citedBy"),
+          agreementKind: pointer?.kind ?? null,
+          registryUrl: pointer?.registryUrl ?? null,
+          registryId: pointer?.registryId ?? null,
+          originator: pointer?.originator ?? null,
         };
       }))),
       html: out.html,

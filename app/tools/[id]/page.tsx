@@ -5,7 +5,7 @@ import { requireUser } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 import { canWrite } from "@/lib/tenancy";
 import { evaluateRubric, mergedExhibit, overrideKeys, type AiStatus, type AgreementStatus } from "@/lib/rubric";
-import { updateTool, uploadAgreement } from "@/app/actions/tools";
+import { updateTool, uploadAgreement, recordAlliancePointer } from "@/app/actions/tools";
 
 function V({ v, district }: { v: string | boolean | null | undefined; district?: boolean }) {
   const body = v === null || v === undefined || v === "" ? <span className="unknown">Unknown</span>
@@ -64,6 +64,17 @@ export default async function ToolPage({ params }: { params: Promise<{ id: strin
   async function upload(form: FormData) {
     "use server";
     await uploadAgreement(t.id, form);
+  }
+  async function pointer(form: FormData) {
+    "use server";
+    await recordAlliancePointer({
+      toolId: t.id,
+      registryUrl: String(form.get("registry_url") || ""),
+      registryId: String(form.get("registry_id") || ""),
+      originator: String(form.get("originator") || ""),
+      status: String(form.get("status") || "signed"),
+      expiresOn: String(form.get("expires_on") || ""),
+    });
   }
 
   const tri = (name: string, cur: boolean | null) => (
@@ -151,6 +162,16 @@ export default async function ToolPage({ params }: { params: Promise<{ id: strin
             <label>Expires on <input type="text" name="expires_on" placeholder="YYYY-MM-DD (optional)" /></label>
             <button className="btn secondary" type="submit">Upload agreement</button>
           </form>
+          <h2>Alliance pointer (no file — typed registry reference)</h2>
+          <form action={pointer} className="sans no-print">
+            <label>Registry URL <input type="text" name="registry_url" required placeholder="https://..." maxLength={2000} /></label>
+            <label>Registry id <input type="text" name="registry_id" required maxLength={200} placeholder="e.g. SDPC-12345" /></label>
+            <label>Originator <input type="text" name="originator" required maxLength={200} placeholder="e.g. WA SDPC alliance" /></label>
+            <label>Status <select name="status"><option value="signed">signed</option><option value="expired">expired</option><option value="refused">refused</option></select></label>
+            <label>Expires on <input type="text" name="expires_on" placeholder="YYYY-MM-DD (optional)" /></label>
+            <button className="btn secondary" type="submit">Record pointer</button>
+          </form>
+          <p className="hint sans">No vendor sites are ever checked. The pointer is typed by the council, never fetched.</p>
         </>
       ) : <div className="alert">Your role is read-only.</div>}
 
@@ -162,8 +183,24 @@ export default async function ToolPage({ params }: { params: Promise<{ id: strin
       ) : <p className="hint sans">No staff requests on this row.</p>}
 
       <h2>Agreements ({t.agreements.length})</h2>      {t.agreements.length ? (
-        <table className="sans"><tr><th>When</th><th>Status</th><th>Expires</th><th>By</th><th>Blob key</th></tr>
-          {t.agreements.map((a) => <tr key={a.id}><td>{a.createdAt.toISOString().slice(0, 10)}</td><td>{a.status}</td><td>{a.expiresOn?.toISOString().slice(0, 10) ?? "—"}</td><td>{a.uploadedBy}</td><td><code>{a.blobKey}</code></td></tr>)}
+        <table className="sans"><tr><th>When</th><th>Kind</th><th>Status</th><th>Expires</th><th>By</th><th>Agreement</th></tr>
+          {t.agreements.map((a) => {
+            const kind = (a as { kind?: string }).kind ?? "local_upload";
+            const isPointer = kind === "alliance_pointer";
+            const pa = a as { registryUrl?: string | null; registryId?: string | null; originator?: string | null };
+            return (
+              <tr key={a.id}>
+                <td>{a.createdAt.toISOString().slice(0, 10)}</td>
+                <td>{kind.replace(/_/g, " ")}</td>
+                <td>{a.status}</td>
+                <td>{a.expiresOn?.toISOString().slice(0, 10) ?? "—"}</td>
+                <td>{a.uploadedBy}</td>
+                <td>{isPointer ? (
+                  <>{pa.registryUrl ? <a href={pa.registryUrl}>{pa.registryUrl}</a> : "—"}{pa.registryId ? <> · {pa.registryId}</> : null}{pa.originator ? <> · {pa.originator}</> : null}</>
+                ) : <code>{a.blobKey}</code>}</td>
+              </tr>
+            );
+          })}
         </table>
       ) : <p className="hint sans">No agreements on file.</p>}
 

@@ -53,6 +53,40 @@ export async function familyLetter(db: PrismaClient, districtId: string): Promis
   return `<p>${esc(text)}</p>`;
 }
 
+export type AgreementPointerSummary = {
+  kind: string;
+  registryUrl: string | null;
+  registryId: string | null;
+  originator: string | null;
+} | null;
+
+/** Latest Agreement per tool by createdAt as a canonical pointer summary.
+ *  Null when the tool has no agreement; upload rows read as
+ *  {kind: local_upload, nulls}; pointer rows carry their typed fields.
+ *  Sorted into toolTableHash and pinned at adopt (spec 4.2, Q4). */
+export function latestPointerSummary(
+  agreements?: Array<{
+    kind?: string | null;
+    registryUrl?: string | null;
+    registryId?: string | null;
+    originator?: string | null;
+    createdAt?: Date | string;
+  }> | null
+): AgreementPointerSummary {
+  if (!agreements || agreements.length === 0) return null;
+  const latest = [...agreements].sort((a, b) => {
+    const at = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const bt = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return bt - at;
+  })[0];
+  return {
+    kind: typeof latest.kind === "string" && latest.kind ? latest.kind : "local_upload",
+    registryUrl: typeof latest.registryUrl === "string" ? latest.registryUrl : null,
+    registryId: typeof latest.registryId === "string" ? latest.registryId : null,
+    originator: typeof latest.originator === "string" ? latest.originator : null,
+  };
+}
+
 export function toolTableHash(tools: Array<Record<string, unknown>>): string {
   const canon = [...tools]
     .sort((a, b) => String(a.rawName).localeCompare(String(b.rawName)))
@@ -60,6 +94,10 @@ export function toolTableHash(tools: Array<Record<string, unknown>>): string {
       rawName: t.rawName, aiStatus: t.aiStatus, agreementStatus: t.agreementStatus,
       decision: t.decision, catalogToolId: t.catalogToolId ?? null,
       inUse: t.inUse, exhibitOverride: t.exhibitOverride ?? null,
+      agreementPointer: latestPointerSummary(
+        (t.agreements as Parameters<typeof latestPointerSummary>[0]) ??
+          ((t.agreementPointer as unknown as Parameters<typeof latestPointerSummary>[0]) || null)
+      ),
     }));
   return createHash("sha256").update(JSON.stringify(canon)).digest("hex");
 }
@@ -83,7 +121,7 @@ export async function assemble(db: PrismaClient, districtId: string): Promise<As
   const a = (row?.answers ?? {}) as Answers;
   const tools = await db.districtTool.findMany({
     where: { districtId },
-    include: { catalogTool: true },
+    include: { catalogTool: true, agreements: { orderBy: { createdAt: "desc" } } },
     orderBy: { rawName: "asc" },
   });
 

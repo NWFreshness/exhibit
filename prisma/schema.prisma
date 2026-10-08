@@ -169,6 +169,12 @@ model Agreement {
   toolId     String?
   tool       DistrictTool? @relation(fields: [toolId], references: [id], onDelete: Cascade)
   blobKey    String
+  // kind is local_upload or alliance_pointer. blobKey stays required for
+  // uploads and is empty only for a pointer — never a fake key.
+  kind       String       @default("local_upload")
+  registryUrl String?
+  registryId  String?
+  originator  String?
   status     String       @default("not_requested") // signed | expired | refused | not_requested
   expiresOn  DateTime?
   uploadedBy String
