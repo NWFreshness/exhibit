@@ -6,7 +6,7 @@ import { sessionUser } from "@/lib/session";
 import { canWrite, isOwner, scope } from "@/lib/tenancy";
 import { refuseStudentData } from "@/lib/guard";
 import { isCitationUrlValid, withCitation, inCitationQueue, mergedExhibit } from "@/lib/rubric";
-import { assemble, familyLetter, latestPointerSummary, type Answers } from "@/lib/assembler";
+import { assemble, familyLetter, latestPointerSummary, resolvedToolBands, type Answers } from "@/lib/assembler";
 import { boardLock, REQUIRED_SEATS, OPTIONAL_SEATS } from "@/lib/seats";
 import { buildTrainingPacket } from "@/lib/training";
 import { putBlob } from "@/lib/store";
@@ -263,6 +263,10 @@ export async function adoptSnapshot(): Promise<{ error?: string; id?: string }> 
         // Pin the canonical pointer summary (spec 4.2, Q4): latest Agreement
         // per tool; nulls when the tool has no agreement. Same shape as the hash.
         const pointer = latestPointerSummary(t.agreements ?? null);
+        // Pin the resolved grade-band triple (spec 4.5, Q4): the tool override
+        // wins when set, otherwise the questionnaire band at adopt. Rows from
+        // older snapshots lack these keys: "not recorded at adoption."
+        const bands = resolvedToolBands(t, (qRow?.answers ?? {}) as Answers);
         return {
           rawName: t.rawName, category: t.category, aiStatus: t.aiStatus,
           agreementStatus: t.agreementStatus, decision: t.decision, notes: t.notes,
@@ -271,6 +275,9 @@ export async function adoptSnapshot(): Promise<{ error?: string; id?: string }> 
           registryUrl: pointer?.registryUrl ?? null,
           registryId: pointer?.registryId ?? null,
           originator: pointer?.originator ?? null,
+          integrityK5: bands.integrityK5,
+          integrity68: bands.integrity68,
+          integrity912: bands.integrity912,
         };
       }))),
       html: out.html,

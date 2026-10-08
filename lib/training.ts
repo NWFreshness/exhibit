@@ -5,6 +5,10 @@ import { esc } from "./escape";
 export type SnapshotTool = {
   rawName: string; aiStatus: string; agreementStatus: string; decision: string; notes: string;
   category?: string;
+  // Resolved grade bands pinned at adopt (spec 4.5). Absent on older snapshots.
+  integrityK5?: string | null;
+  integrity68?: string | null;
+  integrity912?: string | null;
 };
 
 export function agreementPill(status: string): string {
@@ -27,9 +31,14 @@ export function buildTrainingPacket(opts: {
   const banner = stale
     ? `<div class="alert stale"><b>This packet is behind the inventory.</b> It reflects the adopted snapshot of ${esc(adoptedOn)}, not later edits. Re-adopt to refresh training.</div>`
     : "";
+  const bandText = (t: SnapshotTool): string => {
+    if (t.integrityK5 === undefined && t.integrity68 === undefined && t.integrity912 === undefined) return "";
+    const w = (v: string | null | undefined) => esc(v ?? "to be decided");
+    return ` — bands K–5 ${w(t.integrityK5)} · 6–8 ${w(t.integrity68)} · 9–12 ${w(t.integrity912)}`;
+  };
   const rows = (list: SnapshotTool[]) =>
     list.length
-      ? "<ul class=\"tidy\">" + list.map((t) => `<li><b>${esc(t.rawName)}</b><span>${agreementPill(t.agreementStatus)}${t.notes ? " — " + esc(t.notes) : ""}</span></li>`).join("") + "</ul>"
+      ? "<ul class=\"tidy\">" + list.map((t) => `<li><b>${esc(t.rawName)}</b><span>${agreementPill(t.agreementStatus)}${t.notes ? " — " + esc(t.notes) : ""}${bandText(t)}</span></li>`).join("") + "</ul>"
       : `<p class="hint">None.</p>`;
   const by = (d: string) => tools.filter((t) => t.decision === d);
   const step = (time: string, title: string, body: string) =>

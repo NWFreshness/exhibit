@@ -87,6 +87,43 @@ export function latestPointerSummary(
   };
 }
 
+export const GRADE_BANDS = ["red", "yellow", "green"] as const;
+export type GradeBand = (typeof GRADE_BANDS)[number];
+
+/** Resolve one grade band (spec 4.5, Q3): the tool override wins when it is a
+ *  valid band, otherwise the questionnaire band, otherwise null (Missing). */
+export function resolveBand(
+  override: string | null | undefined,
+  questionnaire: string | null | undefined
+): GradeBand | null {
+  if (override && (GRADE_BANDS as readonly string[]).includes(override)) return override as GradeBand;
+  if (questionnaire && (GRADE_BANDS as readonly string[]).includes(questionnaire)) {
+    return questionnaire as GradeBand;
+  }
+  return null;
+}
+
+/** Resolve the K–5 / 6–8 / 9–12 triple for a tool row against questionnaire answers. */
+export function resolvedToolBands(
+  tool: {
+    integrityK5Override?: string | null;
+    integrity68Override?: string | null;
+    integrity912Override?: string | null;
+  },
+  answers: {
+    integrityK5?: string | null;
+    integrity68?: string | null;
+    integrity912?: string | null;
+  } | null | undefined
+): { integrityK5: GradeBand | null; integrity68: GradeBand | null; integrity912: GradeBand | null } {
+  const a = answers ?? {};
+  return {
+    integrityK5: resolveBand(tool.integrityK5Override ?? null, a.integrityK5 ?? null),
+    integrity68: resolveBand(tool.integrity68Override ?? null, a.integrity68 ?? null),
+    integrity912: resolveBand(tool.integrity912Override ?? null, a.integrity912 ?? null),
+  };
+}
+
 export function toolTableHash(tools: Array<Record<string, unknown>>): string {
   const canon = [...tools]
     .sort((a, b) => String(a.rawName).localeCompare(String(b.rawName)))
@@ -94,6 +131,9 @@ export function toolTableHash(tools: Array<Record<string, unknown>>): string {
       rawName: t.rawName, aiStatus: t.aiStatus, agreementStatus: t.agreementStatus,
       decision: t.decision, catalogToolId: t.catalogToolId ?? null,
       inUse: t.inUse, exhibitOverride: t.exhibitOverride ?? null,
+      integrityK5Override: t.integrityK5Override ?? null,
+      integrity68Override: t.integrity68Override ?? null,
+      integrity912Override: t.integrity912Override ?? null,
       agreementPointer: latestPointerSummary(
         (t.agreements as Parameters<typeof latestPointerSummary>[0]) ??
           ((t.agreementPointer as unknown as Parameters<typeof latestPointerSummary>[0]) || null)

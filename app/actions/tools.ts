@@ -10,6 +10,7 @@ import { OVERRIDE_BOOL_KEYS, OVERRIDE_TEXT_KEYS, isCitationUrlValid } from "@/li
 
 const tri = z.enum(["true", "false", "unknown"]);
 const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+const band = z.enum(["", "red", "yellow", "green"]);
 const updateSchema = z.object({
   agreementStatus: z.enum(["signed", "expired", "refused", "not_requested"]),
   decision: z.enum(["approved", "limited", "banned", "hold"]),
@@ -20,12 +21,16 @@ const updateSchema = z.object({
   agreementEndsOn: z.string().max(10).default(""),
   renewalOwnerUserId: z.string().max(40).default(""),
   vendorContact: z.string().max(200).default(""),
+  integrityK5: band.default(""),
+  integrity68: band.default(""),
+  integrity912: band.default(""),
 });
 
 export async function updateTool(toolId: string, input: {
   agreementStatus: string; decision: string; aiStatus: string; inUse: boolean;
   notes: string; override: Record<string, string>;
   agreementEndsOn?: string; renewalOwnerUserId?: string; vendorContact?: string;
+  integrityK5?: string; integrity68?: string; integrity912?: string;
 }): Promise<{ error?: string }> {
   const user = await sessionUser();
   if (!user || !canWrite(user)) return { error: "Read-only role." };
@@ -74,6 +79,8 @@ export async function updateTool(toolId: string, input: {
     if (decision === "approved" || decision === "limited") decision = "hold";
   }
   const now = new Date();
+  // Per-tool grade-band overrides (spec 4.5): blank clears back to inherit (null).
+  const bandOrNull = (v: string): string | null => (v === "" ? null : v);
   await prisma.districtTool.update({
     where: { id: tool.id },
     data: {
@@ -82,6 +89,9 @@ export async function updateTool(toolId: string, input: {
       exhibitOverride: over, decidedBy: user.email, decidedAt: now,
       agreementEndsOn: endsOn, renewalOwnerUserId: renewalOwner,
       vendorContact: parsed.data.vendorContact.trim().slice(0, 200),
+      integrityK5Override: bandOrNull(parsed.data.integrityK5),
+      integrity68Override: bandOrNull(parsed.data.integrity68),
+      integrity912Override: bandOrNull(parsed.data.integrity912),
     },
   });
   await prisma.decisionEvent.create({

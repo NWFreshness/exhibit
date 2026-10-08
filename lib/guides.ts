@@ -22,19 +22,32 @@ export function buildToolGuides(
   ownerName: string
 ): ToolGuide[] {
   const usable = tools.filter((t) => t.decision === "approved" || t.decision === "limited");
-  const bands = `K–5: ${answers.integrityK5 ? BAND_WORDS[answers.integrityK5] : "to be decided"}; ` +
-    `6–8: ${answers.integrity68 ? BAND_WORDS[answers.integrity68] : "to be decided"}; ` +
-    `9–12: ${answers.integrity912 ? BAND_WORDS[answers.integrity912] : "to be decided"}.`;
+  // Per-tool resolved bands (spec 4.5, Q5): the pinned row band wins when the
+  // snapshot recorded it, otherwise the district answers. Rows from older
+  // snapshots carry no band keys and say so explicitly.
+  const bandWords = (v: string | null | undefined) =>
+    v && BAND_WORDS[v] ? BAND_WORDS[v] : "to be decided";
+  const hasBandKeys = (t: SnapshotTool) =>
+    t.integrityK5 !== undefined || t.integrity68 !== undefined || t.integrity912 !== undefined;
+  const toolBands = (t: SnapshotTool) =>
+    `K–5: ${bandWords(t.integrityK5 ?? answers.integrityK5)}; ` +
+    `6–8: ${bandWords(t.integrity68 ?? answers.integrity68)}; ` +
+    `9–12: ${bandWords(t.integrity912 ?? answers.integrity912)}.`;
   return usable.map((t) => {
     const limits = t.notes && t.notes.trim() !== "" ? t.notes : "No extra limits recorded — follow the rules below.";
     const row = (k: string, v: string) => `<div class="guide-row"><span>${esc(k)}</span><span>${v}</span></div>`;
+    const legacy = hasBandKeys(t) ? "" : row(
+      "Grade bands",
+      "District bands from this snapshot's pinned answers — per-tool bands were not recorded at adoption."
+    );
     const html =
       `<details class="guide" open>` +
       `<summary><b>${esc(t.rawName)}</b> <span class="status">${esc(t.decision.toUpperCase())}</span></summary>` +
       `<div class="guide-body">` +
       row("Filed under", `${esc(t.category || "General")} · ${agreementPill(t.agreementStatus)}`) +
       row("How we allow it", esc(limits)) +
-      row("Who may use it", esc(bands)) +
+      row("Who may use it", esc(toolBands(t))) +
+      legacy +
       row("Data rules", `${esc(answers.dataRule || "to be decided")} · no-training: ${esc(answers.noTrainingRule || "to be decided")} · disclosure: ${esc(answers.disclosure || "to be decided")}`) +
       `</div><ul class="tidy">` +
       `<li><b>Check output</b><span>Review AI output for accuracy before using it with students.</span></li>` +

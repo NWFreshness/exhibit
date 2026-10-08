@@ -59,6 +59,9 @@ export default async function ToolPage({ params }: { params: Promise<{ id: strin
       agreementEndsOn: String(form.get("agreementEndsOn") || ""),
       renewalOwnerUserId: String(form.get("renewalOwnerUserId") || ""),
       vendorContact: String(form.get("vendorContact") || ""),
+      integrityK5: String(form.get("band_k5") || ""),
+      integrity68: String(form.get("band_68") || ""),
+      integrity912: String(form.get("band_912") || ""),
     });
   }
   async function upload(form: FormData) {
@@ -134,6 +137,16 @@ export default async function ToolPage({ params }: { params: Promise<{ id: strin
             <label>Decision <select name="decision" defaultValue={t.decision}>
               <option value="approved">approved</option><option value="limited">limited</option>
               <option value="banned">banned</option><option value="hold">hold</option>
+            </select></label>
+            <label>Grade-band overrides (blank = use the district rule)</label>
+            <label>K–5 <select name="band_k5" defaultValue={t.integrityK5Override ?? ""}>
+              <option value="">Inherit district rule</option><option value="red">Red</option><option value="yellow">Yellow</option><option value="green">Green</option>
+            </select></label>
+            <label>6–8 <select name="band_68" defaultValue={t.integrity68Override ?? ""}>
+              <option value="">Inherit district rule</option><option value="red">Red</option><option value="yellow">Yellow</option><option value="green">Green</option>
+            </select></label>
+            <label>9–12 <select name="band_912" defaultValue={t.integrity912Override ?? ""}>
+              <option value="">Inherit district rule</option><option value="red">Red</option><option value="yellow">Yellow</option><option value="green">Green</option>
             </select></label>
             <label>District findings — these are your records, not vendor claims</label>
             <label>Calls a generative model {tri("callsGenModel", (over.callsGenModel as boolean) ?? null)}</label>
