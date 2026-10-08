@@ -6,7 +6,7 @@ import { sessionUser } from "@/lib/session";
 import { canWrite } from "@/lib/tenancy";
 import { refuseStudentData } from "@/lib/guard";
 import { putBlob } from "@/lib/store";
-import { OVERRIDE_BOOL_KEYS, OVERRIDE_TEXT_KEYS } from "@/lib/rubric";
+import { OVERRIDE_BOOL_KEYS, OVERRIDE_TEXT_KEYS, isCitationUrlValid } from "@/lib/rubric";
 
 const tri = z.enum(["true", "false", "unknown"]);
 const dateRe = /^\d{4}-\d{2}-\d{2}$/;
@@ -118,8 +118,65 @@ export async function uploadAgreement(toolId: string, form: FormData): Promise<{
   await putBlob(key, buf, file.type || "application/octet-stream");
   await prisma.agreement.create({
     data: {
-      districtId: user.districtId, toolId: tool.id, blobKey: key, status,
+      districtId: user.districtId, toolId: tool.id, blobKey: key, kind: "local_upload", status,
       expiresOn: expiresOn ? new Date(expiresOn) : null, uploadedBy: user.email,
+    },
+  });
+  await prisma.districtTool.update({
+    where: { id: tool.id },
+    data: { agreementStatus: status, decidedBy: user.email, decidedAt: new Date() },
+  });
+  await prisma.decisionEvent.create({
+    data: { districtId: user.districtId, toolId: tool.id, actor: user.email, fromStatus: tool.agreementStatus, toStatus: status },
+  });
+  revalidatePath(`/tools/${tool.id}`);
+  return {};
+}
+
+// Alliance pointer (spec 4.2): a second Agreement writer with no file, no
+// putBlob, and no fetch. Records kind alliance_pointer plus the council-typed
+// registry URL, registry id, and originator, then mirrors uploadAgreement by
+// setting DistrictTool.agreementStatus plus a DecisionEvent. blobKey is empty
+// only for pointers — never a fake key.
+export async function recordAlliancePointer(input: {
+  toolId: string;
+  registryUrl: string;
+  registryId: string;
+  originator: string;
+  status?: string;
+  expiresOn?: string;
+}): Promise<{ error?: string; field?: string }> {
+  const user = await sessionUser();
+  if (!user || !canWrite(user)) return { error: "Read-only role." };
+  const toolId = (input.toolId || "").trim().slice(0, 100);
+  if (!toolId) return { error: "Not found." };
+  const status = (input.status || "signed").trim();
+  if (!["signed", "expired", "refused", "not_requested"].includes(status)) {
+    return { error: "Invalid status.", field: "status" };
+  }
+  const registryUrl = (input.registryUrl || "").trim().slice(0, 2000);
+  if (!isCitationUrlValid(registryUrl)) {
+    return { error: "Invalid registry URL: must start with http:// or https://.", field: "registryUrl" };
+  }
+  const registryId = (input.registryId || "").trim().slice(0, 200);
+  if (!registryId) return { error: "Registry id required (1–200 characters).", field: "registryId" };
+  const originator = (input.originator || "").trim().slice(0, 200);
+  if (!originator) return { error: "Originator required (1–200 characters).", field: "originator" };
+  const expiresRaw = (input.expiresOn || "").trim().slice(0, 10);
+  if (expiresRaw && !dateRe.test(expiresRaw)) {
+    return { error: "Expiry must be YYYY-MM-DD.", field: "expiresOn" };
+  }
+  for (const v of [registryUrl, registryId, originator]) {
+    const blocked = refuseStudentData(v);
+    if (blocked) return { error: blocked };
+  }
+  const tool = await prisma.districtTool.findFirst({ where: { id: toolId, districtId: user.districtId } });
+  if (!tool) return { error: "Not found." };
+  await prisma.agreement.create({
+    data: {
+      districtId: user.districtId, toolId: tool.id, blobKey: "", kind: "alliance_pointer",
+      status, expiresOn: expiresRaw ? new Date(expiresRaw) : null, uploadedBy: user.email,
+      registryUrl, registryId, originator,
     },
   });
   await prisma.districtTool.update({
