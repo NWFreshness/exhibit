@@ -34,6 +34,9 @@ model District {
   drafts       Draft[]
   snapshots    AdoptedSnapshot[]
   acks         TrainingAck[]
+  clauses      Clause[]
+  toolLists    ToolListVersion[]
+  sharedFindings SharedFinding[]
 }
 
 model User {
@@ -109,6 +112,7 @@ model CatalogTool {
   sourceUrl        String?
   createdAt        DateTime @default(now())
   districtTools    DistrictTool[]
+  sharedFindings   SharedFinding[]
 }
 
 // ---- District-owned rows (all carry districtId) ----
@@ -138,7 +142,14 @@ model DistrictTool {
   integrity68Override  String?
   integrity912Override String?
   rubricFlags     String[]     @default([])
+  // Internal council working note. Never printed in any packet or public page.
   notes           String       @default("")
+  // Printed for teachers: on the teacher card, guides, board table, and public list.
+  teacherGuidance String       @default("")
+  // What the limit is. Required when decision is limited. Printed.
+  limitText       String       @default("")
+  // Soft delete: an archived row leaves every list and packet but keeps its audit trail.
+  archivedAt      DateTime?
   decidedBy       String?
   decidedAt       DateTime?
   updatedAt       DateTime     @updatedAt
@@ -197,6 +208,9 @@ model ReviewSeat {
   signedAt       DateTime?
   signedBy       String?
   overrideReason String?
+  // Draft hash this signature or override approved. A changed draft lapses it.
+  // Null on rows signed before hashes were recorded: those stay valid.
+  signedHash     String?
   // Council-assigned owner of this seat (email). Set by invite or by the owner.
   assignedEmail  String?
   createdAt      DateTime @default(now())
@@ -213,9 +227,13 @@ model Clause {
   section     String       // tool_approval | discipline | privacy | staff_use | roles | amendment
   title       String
   body        String       // may contain {{variables}}
+  // Null = shared library row. Set = promoted by that district, visible only to it.
+  districtId  String?
+  district    District?    @relation(fields: [districtId], references: [id], onDelete: Cascade)
   createdAt   DateTime     @default(now())
 
   @@id([id, version])
+  @@index([districtId])
 }
 
 // District decisions, not prose. One row per district.
@@ -324,9 +342,49 @@ model Draft {
   toolHash   String
   answersHash String
   html       String
+  // Model-written text, generated once and editable by the owner. Pages never
+  // call the model on view; adoption copies these.
+  purposeText        String?
+  familyText         String?
+  familyTranslations Json?
   createdAt  DateTime @default(now())
 
   @@index([districtId])
+}
+
+// A published tool list under one adopted policy. The policy text changes
+// rarely; the council publishes a new tool list without re-adopting it.
+model ToolListVersion {
+  id          String          @id @default(cuid())
+  districtId  String
+  district    District        @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  snapshotId  String
+  snapshot    AdoptedSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  publishedBy String
+  publishedAt DateTime        @default(now())
+  toolHash    String
+  toolTable   Json
+
+  @@index([districtId])
+  @@index([snapshotId])
+}
+
+// A cited finding one district chose to share. Other districts see the value
+// and its source, never who shared it, and nothing merges until they accept it.
+model SharedFinding {
+  id            String      @id @default(cuid())
+  districtId    String
+  district      District    @relation(fields: [districtId], references: [id], onDelete: Cascade)
+  catalogToolId String
+  catalogTool   CatalogTool @relation(fields: [catalogToolId], references: [id], onDelete: Cascade)
+  key           String      // usedForTraining | trainingAddressed
+  value         Boolean
+  citationUrl   String
+  citationDate  String
+  createdAt     DateTime    @default(now())
+
+  @@index([districtId])
+  @@index([catalogToolId])
 }
 
 // Immutable snapshot. Rows are NEVER updated after creation.
@@ -345,6 +403,14 @@ model AdoptedSnapshot {
   toolTable   Json
   html        String
   exportKey   String?  // Blob key of exported HTML packet
+  // Council approval creates the snapshot. The board adopts it later: until
+  // this date is set, the snapshot is not public and not trained on.
+  boardAdoptedOn  DateTime?
+  boardResolution String?
+  // Family letter text as approved, plus translations {language: {text, reviewed}}.
+  familyText         String?
+  familyTranslations Json?
+  toolLists   ToolListVersion[]
 
   @@index([districtId])
 }
@@ -355,6 +421,8 @@ model School {
   districtId String
   district   District @relation(fields: [districtId], references: [id], onDelete: Cascade)
   name       String
+  // Staff headcount, entered by the owner: the "of 40" behind "12 signed". A number, not a roster.
+  staffCount Int?
   users      User[]
   acks       TrainingAck[]
   createdAt  DateTime @default(now())
@@ -368,6 +436,8 @@ model TrainingAck {
   districtId String
   district   District @relation(fields: [districtId], references: [id], onDelete: Cascade)
   snapshotId String
+  // Tool list the signer was shown. Training counts follow the policy snapshot.
+  toolListId String?
   // The building the signer picked. The snapshot id pins what they signed:
   // regenerating the working draft never rewrites an acknowledgment.
   schoolId   String?

@@ -5,11 +5,22 @@ import { esc } from "./escape";
 export type SnapshotTool = {
   rawName: string; aiStatus: string; agreementStatus: string; decision: string; notes: string;
   category?: string;
+  // Printed guidance (teacher guidance plus the limit). Absent on rows pinned
+  // before the notes split: those print the note they were adopted with.
+  teacherGuidance?: string | null;
+  limitText?: string | null;
   // Resolved grade bands pinned at adopt (spec 4.5). Absent on older snapshots.
   integrityK5?: string | null;
   integrity68?: string | null;
   integrity912?: string | null;
 };
+
+/** What prints next to a tool. Internal notes never print for rows that carry
+ *  the guidance fields; older pinned rows print their adopted note. */
+export function guidanceOf(t: SnapshotTool): string {
+  if (t.teacherGuidance === undefined && t.limitText === undefined) return t.notes ?? "";
+  return [t.limitText, t.teacherGuidance].map((v) => (v ?? "").trim()).filter(Boolean).join(" ");
+}
 
 export function agreementPill(status: string): string {
   const key = status.replace(/[^a-z_]/gi, "").toLowerCase();
@@ -38,7 +49,7 @@ export function buildTrainingPacket(opts: {
   };
   const rows = (list: SnapshotTool[]) =>
     list.length
-      ? "<ul class=\"tidy\">" + list.map((t) => `<li><b>${esc(t.rawName)}</b><span>${agreementPill(t.agreementStatus)}${t.notes ? " — " + esc(t.notes) : ""}${bandText(t)}</span></li>`).join("") + "</ul>"
+      ? "<ul class=\"tidy\">" + list.map((t) => `<li><b>${esc(t.rawName)}</b><span>${agreementPill(t.agreementStatus)}${guidanceOf(t) ? " — " + esc(guidanceOf(t)) : ""}${bandText(t)}</span></li>`).join("") + "</ul>"
       : `<p class="hint">None.</p>`;
   const by = (d: string) => tools.filter((t) => t.decision === d);
   const step = (time: string, title: string, body: string) =>

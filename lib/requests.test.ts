@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
-import { createToolRequest, openRequestCount } from "./requests";
+import { createToolRequest, openRequestCount, assertPublicRequestCap, PUBLIC_REQUESTS_PER_DAY } from "./requests";
 import { assemble } from "./assembler";
 import { testDb, ensureTestClauses, makeDistrict, wipeDistrict } from "./testutil";
 
@@ -77,6 +77,28 @@ describe("teacher tool request", () => {
     const frozen = await db.adoptedSnapshot.findUniqueOrThrow({ where: { id: snap.id } });
     expect(frozen.html).toBe(before.html);
     expect(frozen.toolHash).toBe(before.toolHash);
+  });
+
+  it("an open request leaves the hash alone and keeps its note off the tool row", async () => {
+    const before = await assemble(db, dId, { prose: false });
+    const r = await createToolRequest(db, dId, {
+      toolName: "Drive-By Tool", note: "anonymous words", requesterEmail: "t@district.org", actorEmail: "t@district.org",
+    });
+    expect((await assemble(db, dId, { prose: false })).toolHash).toBe(before.toolHash);
+    const tool = await db.districtTool.findUniqueOrThrow({ where: { id: r.toolId } });
+    expect(tool.notes).not.toContain("anonymous words");
+    const req = await db.toolRequest.findUniqueOrThrow({ where: { id: r.requestId } });
+    expect(req.note).toBe("anonymous words");
+  });
+
+  it("the daily cap stops a flood of public requests", async () => {
+    const tool = await db.districtTool.findFirstOrThrow({ where: { districtId: other.districtId } }).catch(() =>
+      db.districtTool.create({ data: { districtId: other.districtId, rawName: "Cap Tool" } }));
+    await expect(assertPublicRequestCap(db, other.districtId)).resolves.toBeUndefined();
+    await db.toolRequest.createMany({
+      data: Array.from({ length: PUBLIC_REQUESTS_PER_DAY }, () => ({ districtId: other.districtId, districtToolId: tool.id })),
+    });
+    await expect(assertPublicRequestCap(db, other.districtId)).rejects.toThrow(/Too many requests/);
   });
 
   it("student records in a request are refused", async () => {

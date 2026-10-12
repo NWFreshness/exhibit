@@ -3,7 +3,7 @@ import { Shell } from "@/app/shell";
 import { requireUser } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 import { isOwner } from "@/lib/tenancy";
-import { setDomains, sendInvite, cancelInvite, assignSeat, createSchool, setUserSchool } from "@/app/actions/council";
+import { setDomains, sendInvite, cancelInvite, assignSeat, createSchool, setUserSchool, setSchoolStaff } from "@/app/actions/council";
 
 export default async function CouncilPage() {
   const user = await requireUser();
@@ -42,6 +42,10 @@ export default async function CouncilPage() {
   async function school(form: FormData) {
     "use server";
     await createSchool(String(form.get("name") || ""));
+  }
+  async function staffcount(form: FormData) {
+    "use server";
+    await setSchoolStaff(String(form.get("id")), String(form.get("count") || ""));
   }
   async function userschool(form: FormData) {
     "use server";
@@ -100,8 +104,20 @@ export default async function CouncilPage() {
         <button className="btn secondary" type="submit">Add building</button>
       </form>
       {schools.length ? (
-        <ul className="sans">{schools.map((s) => <li key={s.id}>{s.name}</li>)}</ul>
+        <table className="sans"><thead><tr><th>Building</th><th>Staff count</th></tr></thead>
+          <tbody>{schools.map((s) => (
+            <tr key={s.id}><td>{s.name}</td>
+              <td>
+                <form action={staffcount} className="no-print">
+                  <input type="hidden" name="id" value={s.id} />
+                  <label>Staff in {s.name} <input type="text" inputMode="numeric" name="count" defaultValue={s.staffCount ?? ""} placeholder="e.g. 40" style={{ width: 100, display: "inline" }} /></label>
+                  <button className="btn secondary" type="submit">Set</button>
+                </form>
+              </td></tr>
+          ))}</tbody>
+        </table>
       ) : <p className="hint sans">No buildings yet. Acknowledgments work without them.</p>}
+      <p className="hint sans">The staff count is a headcount only, so training can show “12 of 40 signed”. No names are entered here.</p>
 
       <h2>Seats — assigned and signed</h2>
       <table className="sans"><tr><th>Seat</th><th>Required</th><th>Assigned to</th><th>Signed</th><th className="no-print">Assign</th></tr>

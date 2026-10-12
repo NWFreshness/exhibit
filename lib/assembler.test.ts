@@ -74,4 +74,14 @@ describe("assembler", () => {
     const kinds = new Set(llmCalls.map((c) => c.kind));
     expect([...kinds].sort()).toEqual(["family", "purpose"]);
   });
+
+  it("prose off makes no model call and keeps the same hashes", async () => {
+    const full = await assemble(db, fullId);
+    llmCalls.length = 0;
+    const lean = await assemble(db, fullId, { prose: false });
+    expect(llmCalls.length).toBe(0);
+    expect(lean.toolHash).toBe(full.toolHash);
+    expect(lean.answersHash).toBe(full.answersHash);
+    expect(lean.gate).toEqual(full.gate);
+  });
 });

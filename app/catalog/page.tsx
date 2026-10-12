@@ -18,7 +18,7 @@ export default async function CatalogPage() {
         {tools.map((t) => (
           <tr key={t.id}>
             <td>{t.name}</td><td>{t.vendor}</td><td>{t.category}</td>
-            <td><span className="status">{t.typicalAiStatus.replace(/_/g, " ")}</span></td>
+            <td><span className="status" data-s={t.typicalAiStatus}>{t.typicalAiStatus.replace(/_/g, " ")}</span></td>
             <td>{yn(t.usedForTraining)}</td>
             <td>{t.sourceUrl ? <a href={t.sourceUrl}>source</a> : <span className="unknown">Unknown</span>}</td>
           </tr>

@@ -13,7 +13,8 @@ export type ParsedCsv = { headers: string[]; rows: string[][] };
 export function parseCsv(text: string): ParsedCsv {
   const lines = String(text || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   if (!lines.length) return { headers: [], rows: [] };
-  const split = (l: string) => l.split(",").map((c) => c.trim().replace(/^"|"$/g, ""));
+  // Split only on commas outside quotes: a comma followed by an even number of quotes.
+  const split = (l: string) => l.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map((c) => c.trim().replace(/^"|"$/g, ""));
   return { headers: split(lines[0]).map((h) => h.toLowerCase()), rows: lines.slice(1).map(split) };
 }
 

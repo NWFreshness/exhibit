@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Shell } from "@/app/shell";
 import { requireUser } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
-import { canWrite, isOwner } from "@/lib/tenancy";
+import { canWrite, clauseScope, isOwner } from "@/lib/tenancy";
 import { assemble } from "@/lib/assembler";
 import { boardLock } from "@/lib/seats";
 import { citationQueueReasons, mergedExhibit } from "@/lib/rubric";
@@ -11,18 +11,18 @@ import { mintRequestToken } from "@/app/actions/requests";
 
 export default async function ReviewPage() {
   const user = await requireUser();
-  const out = await assemble(prisma, user.districtId);
+  const out = await assemble(prisma, user.districtId, { prose: false });
   const byTitle = Object.fromEntries(out.sections.map((s) => [s.title, s.html]));
-  const tools = await prisma.districtTool.findMany({ where: { districtId: user.districtId }, include: { catalogTool: true }, orderBy: { rawName: "asc" } });
-  const clauses = await prisma.clause.findMany({ orderBy: [{ id: "asc" }, { version: "desc" }] });
+  const tools = await prisma.districtTool.findMany({ where: { districtId: user.districtId, archivedAt: null }, include: { catalogTool: true }, orderBy: { rawName: "asc" } });
+  const clauses = await prisma.clause.findMany({ where: clauseScope(user.districtId), orderBy: [{ id: "asc" }, { version: "desc" }] });
   const clauseIds = [...new Map(clauses.map((c) => [c.id, c])).values()];
   const comments = await prisma.comment.findMany({ where: { districtId: user.districtId }, orderBy: { createdAt: "desc" } });
   const seats = await prisma.reviewSeat.findMany({ where: { districtId: user.districtId }, orderBy: { seat: "asc" } });
-  const lock = await boardLock(prisma, user.districtId);
+  const lock = await boardLock(prisma, user.districtId, out.draftHash);
   const writable = canWrite(user);
   const owner = isOwner(user);
   const openRequests = await prisma.districtTool.findMany({
-    where: { districtId: user.districtId, source: "request", decision: "hold" },
+    where: { districtId: user.districtId, archivedAt: null, source: "request", decision: "hold" },
     include: { requests: { orderBy: { createdAt: "asc" } } },
     orderBy: { rawName: "asc" },
   });
@@ -75,6 +75,7 @@ export default async function ReviewPage() {
       trainingAddressed: String(form.get("trainingAddressed") || ""),
       citationUrl: String(form.get("citationUrl") || ""),
       citationDate: String(form.get("citationDate") || ""),
+      share: form.get("share") === "on",
     });
   }
 
@@ -94,7 +95,7 @@ export default async function ReviewPage() {
     <Shell user={user} title="Review packets">
       {lock.locked
         ? <div className="alert error"><b>Board packet locked.</b> {lock.reason}</div>
-        : <div className="alert"><b>Board packet unlocked.</b> Required seats signed or overridden.</div>}
+        : <div className="alert"><b>Board packet unlocked.</b> Required seats signed this draft or were overridden.</div>}
 
       <h2 id="requests">Open staff requests ({openRequests.length})</h2>
       {openRequests.length ? (
@@ -138,6 +139,7 @@ export default async function ReviewPage() {
                     )}
                     <label>Source URL <input type="text" name="citationUrl" placeholder="https://…" style={{ width: 220 }} /></label>
                     <label>Date <input type="date" name="citationDate" defaultValue={today} /></label>
+                    {t.catalogToolId && <label><input type="checkbox" name="share" /> Share this finding and its source with other districts (your district is not named)</label>}
                     <button className="btn secondary" type="submit">Cite</button>
                   </form>
                 ) : <span className="hint">Read-only role.</span>}
@@ -164,7 +166,7 @@ export default async function ReviewPage() {
         {seats.map((s) => (
           <tr key={s.seat}>
             <td>{s.seat}</td><td>{s.required ? "Yes" : "Optional"}</td>
-            <td>{s.signedAt ? `Signed ${s.signedAt.toISOString().slice(0, 10)} by ${s.signedBy}` : s.overrideReason ? `Override: ${s.overrideReason}` : "Pending"}</td>
+            <td>{s.signedAt ? `Signed ${s.signedAt.toISOString().slice(0, 10)} by ${s.signedBy}` : s.overrideReason ? `Override: ${s.overrideReason}` : "Pending"}{lock.lapsed.includes(s.seat) ? <> <span className="status" data-s="limited">Signed an earlier draft — sign again</span></> : null}</td>
             <td className="no-print">
               {writable && (
                 <form action={sign} style={{ display: "inline" }}>

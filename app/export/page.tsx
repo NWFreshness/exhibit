@@ -3,11 +3,12 @@ import { Shell } from "@/app/shell";
 import { requireUser } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 import { assemble } from "@/lib/assembler";
+import { currentPolicy } from "@/lib/policy";
 
 export default async function ExportIndex() {
   const user = await requireUser();
-  const out = await assemble(prisma, user.districtId);
-  const snap = await prisma.adoptedSnapshot.findFirst({ where: { districtId: user.districtId }, orderBy: { adoptedAt: "desc" } });
+  const out = await assemble(prisma, user.districtId, { prose: false });
+  const snap = await currentPolicy(prisma, user.districtId);
   return (
     <Shell user={user} title="Export">
       {out.gate.length > 0
@@ -19,7 +20,7 @@ export default async function ExportIndex() {
         <li><Link href="/export/family">One-page family letter</Link></li>
         <li><Link href="/export/teacher">One-page teacher card</Link></li>
       </ul>
-      <p className="hint sans">Print: use your browser&apos;s print-to-PDF. HTML export is the supported format; adopted packets are also stored to Blob.</p>
+      <p className="hint sans">Each export has a “Save as PDF or print” button. It opens your browser&apos;s print dialog; choose “Save as PDF” there. Adopted packets are also stored as a file.</p>
     </Shell>
   );
 }

@@ -2,7 +2,9 @@
 // 504s, discipline notes, or pasted student work. Server-side refusal.
 const PATTERNS = [
   /\bIEP\b/i,
-  /\b504\b/,
+  // "504" alone is also an area code and a street number; the record is a 504 plan.
+  /\b504 (plans?|accommodations?)\b/i,
+  /\bsection 504\b/i,
   /\bgradebook\b/i,
   /\broster\b/i,
   /date of birth/i,

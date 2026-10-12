@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { sessionUser } from "@/lib/session";
 import { canWrite } from "@/lib/tenancy";
 import { candidatesFromCsv } from "@/lib/csv";
+import { closeCatalogMatch } from "@/lib/requests";
 
 export type PreviewRow = { name: string; category: string; suggestion: { id: string; name: string } | null };
 
@@ -15,10 +16,8 @@ export async function previewImport(csv: string): Promise<{ rows?: PreviewRow[];
   if (parsed.error || !parsed.rows) return { error: parsed.error };
   const catalog = await prisma.catalogTool.findMany({ select: { id: true, name: true } });
   const match = (name: string) => {
-    const n = name.toLowerCase();
-    return catalog.find((c) => c.name.toLowerCase() === n)
-      ?? catalog.find((c) => n.includes(c.name.toLowerCase().split(" ")[0]) || c.name.toLowerCase().includes(n.split(" ")[0]))
-      ?? null;
+    const id = closeCatalogMatch(name, catalog);
+    return catalog.find((c) => c.id === id) ?? null;
   };
   return { rows: parsed.rows.map((c) => ({ ...c, suggestion: match(c.name) })) };
 }
@@ -51,8 +50,15 @@ export async function confirmImport(input: Array<{ name: string; category: strin
   if (!user || !canWrite(user)) return { count: 0, error: "Read-only role." };
   const parsed = confirmSchema.safeParse(input.slice(0, 100));
   if (!parsed.success) return { count: 0, error: "Invalid rows." };
+  // A name already in the inventory is skipped, so importing the same file twice adds nothing.
+  const have = new Set(
+    (await prisma.districtTool.findMany({ where: { districtId: user.districtId, archivedAt: null }, select: { rawName: true } }))
+      .map((t) => t.rawName.toLowerCase())
+  );
   let n = 0;
   for (const r of parsed.data) {
+    if (have.has(r.name.toLowerCase())) continue;
+    have.add(r.name.toLowerCase());
     let catalogId: string | null = null;
     if (r.catalogId) {
       const cat = await prisma.catalogTool.findUnique({ where: { id: r.catalogId } });
@@ -80,6 +86,10 @@ export async function addTool(name: string, category: string): Promise<{ error?:
   if (!user || !canWrite(user)) return { error: "Read-only role." };
   const nm = name.trim().slice(0, 200);
   if (!nm) return { error: "Tool name required." };
+  const dup = await prisma.districtTool.findFirst({
+    where: { districtId: user.districtId, archivedAt: null, rawName: { equals: nm, mode: "insensitive" } },
+  });
+  if (dup) return { error: "That tool is already in the inventory." };
   const catalog = await prisma.catalogTool.findMany({ select: { id: true, name: true } });
   const n = nm.toLowerCase();
   const hit = catalog.find((c) => c.name.toLowerCase() === n) ?? null;

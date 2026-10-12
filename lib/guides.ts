@@ -2,7 +2,7 @@
 // never involved. Covers approved + limited in-use tools; banned/hold tools
 // get no guide because there is nothing to train on except "don't use it".
 import { esc } from "./escape";
-import { agreementPill, type SnapshotTool } from "./training";
+import { agreementPill, guidanceOf, type SnapshotTool } from "./training";
 import type { Answers } from "./assembler";
 
 export type { SnapshotTool as GuideTool };
@@ -34,7 +34,7 @@ export function buildToolGuides(
     `6–8: ${bandWords(t.integrity68 ?? answers.integrity68)}; ` +
     `9–12: ${bandWords(t.integrity912 ?? answers.integrity912)}.`;
   return usable.map((t) => {
-    const limits = t.notes && t.notes.trim() !== "" ? t.notes : "No extra limits recorded — follow the rules below.";
+    const limits = guidanceOf(t).trim() || "No extra limits recorded — follow the rules below.";
     const row = (k: string, v: string) => `<div class="guide-row"><span>${esc(k)}</span><span>${v}</span></div>`;
     const legacy = hasBandKeys(t) ? "" : row(
       "Grade bands",

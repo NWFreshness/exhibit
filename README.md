@@ -5,7 +5,7 @@ Not a chatbot, tutor, LMS, chat-over-policy, or analytics.
 
 ## Stack
 Next.js App Router + TypeScript + Prisma + Postgres (Neon / Vercel Postgres;
-local docker for dev) + Auth.js magic link + Vercel Blob. One OpenAI-compatible
+local docker for dev) + Auth.js (Google, Microsoft Entra, magic link) + Vercel Blob. One OpenAI-compatible
 client (`lib/llm.ts`, base URL + key from env). Assembler and review run in
 server actions — no worker, no queue.
 
@@ -32,9 +32,10 @@ snapshot immutability, training packet, CSV guard. See `progress.md`.
 
 ## Deploy on Vercel
 Set `DATABASE_URL` (Neon / Vercel Postgres), `AUTH_SECRET`, `AUTH_URL`,
-SMTP_* for magic links (or leave empty for dev pickup), `LLM_BASE_URL` +
+SMTP_* for magic links (required: dev pickup is off in production), `LLM_BASE_URL` +
 `LLM_API_KEY` for real prose (else stub text), `BLOB_READ_WRITE_TOKEN`
 (else local-disk fallback, dev only).
 
-Out of scope: cron, Clever/SIS sync, billing, privacy-policy watching,
-Microsoft login, ESD parent tenants.
+Out of scope: Clever/SIS sync, billing, privacy-policy watching, ESD parent
+tenants. The monthly renewal cron (`/api/cron/renewals`, needs `CRON_SECRET`)
+makes no outbound HTTP.

@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { sessionUser } from "@/lib/session";
 import { isOwner } from "@/lib/tenancy";
-import { createToolRequest, mintRequestToken as mintToken } from "@/lib/requests";
+import { assertPublicRequestCap, createToolRequest, mintRequestToken as mintToken } from "@/lib/requests";
 
 const schema = z.object({
   toolName: z.string().min(1).max(200),
@@ -19,7 +19,7 @@ const schema = z.object({
 /** Pass through our own validation messages; never leak raw DB errors to the form. */
 function friendly(e: unknown): string {
   const m = e instanceof Error ? e.message : "Request failed.";
-  if (/^(Refused|Fill in|Tool name|Requester email|Unknown district|Your school email|Sign in)/.test(m)) return m;
+  if (/^(Refused|Fill in|Tool name|Requester email|Unknown district|Your school email|Sign in|Too many requests)/.test(m)) return m;
   console.error("[request]", m.slice(0, 300));
   return "Request could not be saved. Check the fields and try again.";
 }
@@ -59,6 +59,7 @@ export async function submitPublicRequest(districtId: string, input: RequestForm
   if (!parsed.success) return { error: "Fill in at least the tool name." };
   if (!parsed.data.requesterEmail) return { error: "Your school email is required so the council can follow up." };
   try {
+    await assertPublicRequestCap(prisma, districtId);
     const r = await createToolRequest(prisma, districtId, { ...parsed.data, actorEmail: parsed.data.requesterEmail });
     return { existing: r.existing, statusToken: r.statusToken };
   } catch (e) {

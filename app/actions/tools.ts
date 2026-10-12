@@ -3,10 +3,10 @@ import { z } from "zod";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { sessionUser } from "@/lib/session";
-import { canWrite } from "@/lib/tenancy";
+import { canWrite, isOwner } from "@/lib/tenancy";
 import { refuseStudentData } from "@/lib/guard";
 import { putBlob } from "@/lib/store";
-import { OVERRIDE_BOOL_KEYS, OVERRIDE_TEXT_KEYS, isCitationUrlValid } from "@/lib/rubric";
+import { OVERRIDE_BOOL_KEYS, OVERRIDE_TEXT_KEYS, isCitationUrlValid, mergedExhibit } from "@/lib/rubric";
 
 const tri = z.enum(["true", "false", "unknown"]);
 const dateRe = /^\d{4}-\d{2}-\d{2}$/;
@@ -17,6 +17,8 @@ const updateSchema = z.object({
   aiStatus: z.enum(["calls_model", "no_model", "unknown"]),
   inUse: z.boolean(),
   notes: z.string().max(2000),
+  teacherGuidance: z.string().max(1000).default(""),
+  limitText: z.string().max(500).default(""),
   override: z.record(z.string(), z.string().max(500)),
   agreementEndsOn: z.string().max(10).default(""),
   renewalOwnerUserId: z.string().max(40).default(""),
@@ -29,6 +31,7 @@ const updateSchema = z.object({
 export async function updateTool(toolId: string, input: {
   agreementStatus: string; decision: string; aiStatus: string; inUse: boolean;
   notes: string; override: Record<string, string>;
+  teacherGuidance?: string; limitText?: string;
   agreementEndsOn?: string; renewalOwnerUserId?: string; vendorContact?: string;
   integrityK5?: string; integrity68?: string; integrity912?: string;
 }): Promise<{ error?: string }> {
@@ -36,12 +39,17 @@ export async function updateTool(toolId: string, input: {
   if (!user || !canWrite(user)) return { error: "Read-only role." };
   const parsed = updateSchema.safeParse(input);
   if (!parsed.success) return { error: "Invalid values." };
-  const tool = await prisma.districtTool.findFirst({ where: { id: toolId, districtId: user.districtId } });
+  const tool = await prisma.districtTool.findFirst({ where: { id: toolId, districtId: user.districtId }, include: { catalogTool: true } });
   if (!tool) return { error: "Not found." };
-  const blocked = refuseStudentData(parsed.data.notes);
+  const blocked = refuseStudentData(parsed.data.notes) || refuseStudentData(parsed.data.teacherGuidance) || refuseStudentData(parsed.data.limitText);
   if (blocked) return { error: blocked };
   // District exhibit override: only known keys; "unknown"/empty clears back to catalog.
   const over: Record<string, boolean | string> = {};
+  // The citation triple is written by citeFinding, not this form: carry it over.
+  const prior = (tool.exhibitOverride ?? {}) as Record<string, unknown>;
+  for (const k of ["citationUrl", "citationDate", "citedBy"]) {
+    if (typeof prior[k] === "string") over[k] = prior[k] as string;
+  }
   for (const k of OVERRIDE_BOOL_KEYS) {
     const v = tri.safeParse(parsed.data.override[k] ?? "unknown");
     if (v.success && v.data !== "unknown") over[k] = v.data === "true";
@@ -78,6 +86,20 @@ export async function updateTool(toolId: string, input: {
     if (status !== "expired") status = "expired";
     if (decision === "approved" || decision === "limited") decision = "hold";
   }
+  // The two rubric rules that are never a judgment call. The rest of the
+  // rubric stays a suggestion the council may overrule.
+  if (decision === "approved") {
+    if (status !== "signed") return { error: "Cannot approve without a signed agreement. Use limited, hold, or banned." };
+    if (mergedExhibit(tool.catalogTool, over).usedForTraining === true) {
+      return { error: "Cannot approve: content is used for training. Use limited or banned." };
+    }
+  }
+  const limitText = parsed.data.limitText.trim();
+  // Asked for when a tool becomes limited. A row that was already limited
+  // before limits existed can still be saved without one.
+  if (decision === "limited" && tool.decision !== "limited" && !limitText) {
+    return { error: "A limited tool needs its limit written down: who may use it, or for what." };
+  }
   const now = new Date();
   // Per-tool grade-band overrides (spec 4.5): blank clears back to inherit (null).
   const bandOrNull = (v: string): string | null => (v === "" ? null : v);
@@ -86,6 +108,7 @@ export async function updateTool(toolId: string, input: {
     data: {
       agreementStatus: status, decision,
       aiStatus: parsed.data.aiStatus, inUse: parsed.data.inUse, notes: parsed.data.notes,
+      teacherGuidance: parsed.data.teacherGuidance.trim(), limitText,
       exhibitOverride: over, decidedBy: user.email, decidedAt: now,
       agreementEndsOn: endsOn, renewalOwnerUserId: renewalOwner,
       vendorContact: parsed.data.vendorContact.trim().slice(0, 200),
@@ -123,18 +146,24 @@ export async function uploadAgreement(toolId: string, form: FormData): Promise<{
     return { error: "Refused: uploads are contracts and district documents only. Never upload student records." };
   }
   if (!["signed", "expired", "refused", "not_requested"].includes(status)) return { error: "Invalid status." };
+  if (expiresOn && !dateRe.test(expiresOn)) return { error: "Expiry must be YYYY-MM-DD." };
+  const endsOn = expiresOn ? new Date(expiresOn + "T00:00:00") : null;
   const buf = Buffer.from(await file.arrayBuffer());
-  const key = `agreements/${user.districtId}/${tool.id}/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
-  await putBlob(key, buf, file.type || "application/octet-stream");
+  // octet-stream always: the file is public by URL, so it must never render as a page.
+  const stored = await putBlob(
+    `agreements/${user.districtId}/${tool.id}/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}`,
+    buf, "application/octet-stream"
+  );
   await prisma.agreement.create({
     data: {
-      districtId: user.districtId, toolId: tool.id, blobKey: key, kind: "local_upload", status,
-      expiresOn: expiresOn ? new Date(expiresOn) : null, uploadedBy: user.email,
+      districtId: user.districtId, toolId: tool.id, blobKey: stored.key, kind: "local_upload", status,
+      expiresOn: endsOn, uploadedBy: user.email,
     },
   });
+  // The renewal pass reads the tool's end date, so the upload's expiry lands there too.
   await prisma.districtTool.update({
     where: { id: tool.id },
-    data: { agreementStatus: status, decidedBy: user.email, decidedAt: new Date() },
+    data: { agreementStatus: status, decidedBy: user.email, decidedAt: new Date(), ...(endsOn ? { agreementEndsOn: endsOn } : {}) },
   });
   await prisma.decisionEvent.create({
     data: { districtId: user.districtId, toolId: tool.id, actor: user.email, fromStatus: tool.agreementStatus, toStatus: status },
@@ -182,20 +211,96 @@ export async function recordAlliancePointer(input: {
   }
   const tool = await prisma.districtTool.findFirst({ where: { id: toolId, districtId: user.districtId } });
   if (!tool) return { error: "Not found." };
+  const endsOn = expiresRaw ? new Date(expiresRaw + "T00:00:00") : null;
   await prisma.agreement.create({
     data: {
       districtId: user.districtId, toolId: tool.id, blobKey: "", kind: "alliance_pointer",
-      status, expiresOn: expiresRaw ? new Date(expiresRaw) : null, uploadedBy: user.email,
+      status, expiresOn: endsOn, uploadedBy: user.email,
       registryUrl, registryId, originator,
     },
   });
   await prisma.districtTool.update({
     where: { id: tool.id },
-    data: { agreementStatus: status, decidedBy: user.email, decidedAt: new Date() },
+    data: { agreementStatus: status, decidedBy: user.email, decidedAt: new Date(), ...(endsOn ? { agreementEndsOn: endsOn } : {}) },
   });
   await prisma.decisionEvent.create({
     data: { districtId: user.districtId, toolId: tool.id, actor: user.email, fromStatus: tool.agreementStatus, toStatus: status },
   });
   revalidatePath(`/tools/${tool.id}`);
+  return {};
+}
+
+// ---- Owner housekeeping: archive, rename, merge. Each leaves a DecisionEvent.
+
+async function ownedTool(toolId: string) {
+  const user = await sessionUser();
+  if (!user || !isOwner(user)) return { error: "Owner only." } as const;
+  const tool = await prisma.districtTool.findFirst({ where: { id: toolId, districtId: user.districtId } });
+  if (!tool) return { error: "Not found." } as const;
+  return { user, tool } as const;
+}
+
+/** Soft delete. An archived tool leaves every list, packet, and hash but
+ *  keeps its agreements, requests, and audit trail. `archived: false` restores it. */
+export async function archiveTool(toolId: string, archived: boolean): Promise<{ error?: string }> {
+  const r = await ownedTool(toolId);
+  if ("error" in r) return { error: r.error };
+  await prisma.$transaction([
+    prisma.districtTool.update({ where: { id: r.tool.id }, data: { archivedAt: archived ? new Date() : null } }),
+    prisma.decisionEvent.create({
+      data: { districtId: r.user.districtId, toolId: r.tool.id, actor: r.user.email, fromStatus: archived ? "active" : "archived", toStatus: archived ? "archived" : "active" },
+    }),
+  ]);
+  revalidatePath("/inventory");
+  revalidatePath(`/tools/${r.tool.id}`);
+  return {};
+}
+
+export async function renameTool(toolId: string, name: string): Promise<{ error?: string }> {
+  const r = await ownedTool(toolId);
+  if ("error" in r) return { error: r.error };
+  const nm = name.trim().replace(/\s+/g, " ").slice(0, 200);
+  if (!nm) return { error: "Tool name required." };
+  const blocked = refuseStudentData(nm);
+  if (blocked) return { error: blocked };
+  const dup = await prisma.districtTool.findFirst({
+    where: { districtId: r.user.districtId, archivedAt: null, id: { not: r.tool.id }, rawName: { equals: nm, mode: "insensitive" } },
+  });
+  if (dup) return { error: "Another tool already has that name. Merge them instead." };
+  await prisma.$transaction([
+    prisma.districtTool.update({ where: { id: r.tool.id }, data: { rawName: nm } }),
+    prisma.decisionEvent.create({
+      data: { districtId: r.user.districtId, toolId: r.tool.id, actor: r.user.email, fromStatus: `name: ${r.tool.rawName}`, toStatus: `name: ${nm}` },
+    }),
+  ]);
+  revalidatePath("/inventory");
+  revalidatePath(`/tools/${r.tool.id}`);
+  return {};
+}
+
+/** Fold a duplicate into the row being kept. Requests, agreements, comments,
+ *  events, and renewal flags move over; the duplicate row is then removed.
+ *  The kept row's own decision and findings are not changed. */
+export async function mergeTool(keepId: string, dropId: string): Promise<{ error?: string }> {
+  const r = await ownedTool(keepId);
+  if ("error" in r) return { error: r.error };
+  if (keepId === dropId) return { error: "Pick a different tool to merge in." };
+  const drop = await prisma.districtTool.findFirst({ where: { id: dropId, districtId: r.user.districtId } });
+  if (!drop) return { error: "Not found." };
+  const move = { where: { districtToolId: drop.id }, data: { districtToolId: r.tool.id } };
+  const moveTool = { where: { toolId: drop.id }, data: { toolId: r.tool.id } };
+  await prisma.$transaction([
+    prisma.toolRequest.updateMany(move),
+    prisma.renewalFlag.updateMany(move),
+    prisma.agreement.updateMany(moveTool),
+    prisma.decisionEvent.updateMany(moveTool),
+    prisma.comment.updateMany({ where: { toolId: drop.id }, data: { toolId: r.tool.id, targetId: r.tool.id } }),
+    prisma.decisionEvent.create({
+      data: { districtId: r.user.districtId, toolId: r.tool.id, actor: r.user.email, fromStatus: `merged in: ${drop.rawName}`, toStatus: `${r.tool.agreementStatus}/${r.tool.decision}` },
+    }),
+    prisma.districtTool.delete({ where: { id: drop.id } }),
+  ]);
+  revalidatePath("/inventory");
+  revalidatePath(`/tools/${r.tool.id}`);
   return {};
 }

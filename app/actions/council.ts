@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { sessionUser } from "@/lib/session";
 import { isOwner } from "@/lib/tenancy";
+import { domainClaimedElsewhere, FREE_MAIL_DOMAINS } from "@/lib/domain";
 
 const ROLES = ["owner", "curriculum", "sped", "viewer"] as const;
 
@@ -12,8 +13,8 @@ export async function setDomains(districtId: string, domainsCsv: string): Promis
   if (!user || !isOwner(user) || user.districtId !== districtId) return { error: "Owner only, own district." };
   const domains = domainsCsv.split(/[,\s]+/).map((d) => d.toLowerCase().trim()).filter((d) => d.includes("."));
   if (!domains.length) return { error: "At least one primary domain is required." };
-  const free = ["gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com", "aol.com"];
-  if (domains.some((d) => free.includes(d))) return { error: "Public mail providers cannot be a login domain." };
+  if (domains.some((d) => FREE_MAIL_DOMAINS.includes(d))) return { error: "Public mail providers cannot be a login domain." };
+  if (await domainClaimedElsewhere(prisma, districtId, domains)) return { error: "One of those domains already belongs to another district." };
   await prisma.district.update({ where: { id: districtId }, data: { allowedDomains: domains } });
   revalidatePath("/council");
   return {};
@@ -91,5 +92,19 @@ export async function setUserSchool(userId: string, schoolId: string): Promise<{
   }
   await prisma.user.update({ where: { id: member.id }, data: { schoolId: schoolId || null } });
   revalidatePath("/council");
+  return {};
+}
+
+/** Staff headcount for a building: the "of 40" behind "12 signed". Blank clears it. */
+export async function setSchoolStaff(schoolId: string, count: string): Promise<{ error?: string }> {
+  const user = await sessionUser();
+  if (!user || !isOwner(user)) return { error: "Owner only." };
+  const s = await prisma.school.findFirst({ where: { id: schoolId, districtId: user.districtId } });
+  if (!s) return { error: "Unknown building." };
+  const n = count.trim() === "" ? null : Number(count);
+  if (n !== null && (!Number.isInteger(n) || n < 1 || n > 5000)) return { error: "Staff count must be a whole number from 1 to 5000." };
+  await prisma.school.update({ where: { id: s.id }, data: { staffCount: n } });
+  revalidatePath("/council");
+  revalidatePath("/training");
   return {};
 }

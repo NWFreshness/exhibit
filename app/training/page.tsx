@@ -8,26 +8,30 @@ import { buildingRollup } from "@/lib/rollup";
 import { buildToolGuides } from "@/lib/guides";
 import { ackTraining, generateTrainingScript } from "@/app/actions/policy";
 import { canWrite } from "@/lib/tenancy";
+import { currentPolicy, toolListFor } from "@/lib/policy";
+import { PrintButton } from "@/app/print-button";
 import type { Answers } from "@/lib/assembler";
 
 export default async function TrainingPage() {
   const user = await requireUser();
-  const snap = await prisma.adoptedSnapshot.findFirst({ where: { districtId: user.districtId }, orderBy: { adoptedAt: "desc" } });
+  const snap = await currentPolicy(prisma, user.districtId);
   if (!snap) {
-    return <Shell user={user} title="Training packet"><div className="alert">No adopted snapshot yet. The training packet is generated only from an adopted snapshot. <Link href="/draft">Open the draft</Link>.</div></Shell>;
+    return <Shell user={user} title="Training packet"><div className="alert">No policy is in force yet. The training packet is generated only from a policy the board has adopted. <Link href="/draft">Open the draft</Link>.</div></Shell>;
   }
-  const live = await assemble(prisma, user.districtId);
-  const stale = live.toolHash !== snap.toolHash || live.answersHash !== snap.answersHash;
+  const toolList = await toolListFor(prisma, snap);
+  const live = await assemble(prisma, user.districtId, { prose: false });
+  const stale = live.toolHash !== toolList.toolHash;
   const district = await prisma.district.findUniqueOrThrow({ where: { id: user.districtId } });
   const packet = buildTrainingPacket({
     districtName: district.name,
     adoptedOn: snap.adoptedAt.toISOString().slice(0, 10),
     adoptedBy: snap.adoptedBy,
     stale,
-    tools: snap.toolTable as SnapshotTool[],
+    tools: toolList.toolTable as SnapshotTool[],
   });
   const schools = await prisma.school.findMany({ where: { districtId: user.districtId }, orderBy: { name: "asc" } });
   const schoolNames = Object.fromEntries(schools.map((s) => [s.id, s.name]));
+  const staff: Record<string, number | null> = Object.fromEntries(schools.map((s) => [s.id, s.staffCount]));
   const allAcks = await prisma.trainingAck.findMany({
     where: { districtId: user.districtId, snapshotId: snap.id }, orderBy: { createdAt: "desc" },
   });
@@ -42,7 +46,7 @@ export default async function TrainingPage() {
   const pinnedAnswers = (snap.answersJson ?? null) as Answers | null;
   const guideAnswers: Answers = pinnedAnswers ?? (((await prisma.questionnaireAnswer.findUnique({ where: { districtId: user.districtId } }))?.answers ?? {}) as Answers);
   const guides = buildToolGuides(
-    (snap.toolTable ?? []) as SnapshotTool[],
+    (toolList.toolTable ?? []) as SnapshotTool[],
     guideAnswers, district.name, guideAnswers.ownerName || "Technology Director"
   );
 
@@ -61,7 +65,8 @@ export default async function TrainingPage() {
 
   return (
     <Shell user={user} title="Training packet">
-      <p className="sans">Generated only from the adopted snapshot of {snap.adoptedAt.toISOString().slice(0, 10)} — never from the live inventory. Signing names the snapshot version you trained on.</p>
+      <p className="sans">Generated only from the policy the board adopted on {snap.boardAdoptedOn!.toISOString().slice(0, 10)} and the tool list published {toolList.publishedAt.toISOString().slice(0, 10)} — never from the live inventory. Signing names the policy you trained on; a newer tool list does not reset training.</p>
+      <PrintButton />
       {scopedSchool && <div className="alert"><b>Principal view:</b> showing {schoolNames[scopedSchool] ?? "your building"} in full; other buildings show counts only.</div>}
       <section><div dangerouslySetInnerHTML={{ __html: packet.principalScript }} /></section>
       <section><div dangerouslySetInnerHTML={{ __html: packet.teacherCard }} /></section>
@@ -97,7 +102,7 @@ export default async function TrainingPage() {
         const rows = names === null ? null : allAcks.filter((a) => a.schoolId === schoolId);
         return (
           <div key={schoolId}>
-            <h3>{name} — {count} signed</h3>
+            <h3>{name} — {count}{staff[schoolId] ? ` of ${staff[schoolId]}` : ""} signed{staff[schoolId] ? ` (${Math.min(100, Math.round((count / staff[schoolId]!) * 100))}%)` : ""}</h3>
             {rows ? (
               rows.length ? (
                 <table className="sans"><tr><th>Name</th><th>Date</th></tr>

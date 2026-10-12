@@ -29,6 +29,11 @@ export function isOwner(user: SessionUser): boolean {
   return user.role === "owner";
 }
 
+/** Clause visibility: the shared library plus this district's own promoted versions. */
+export function clauseScope(districtId: string) {
+  return { OR: [{ districtId: null }, { districtId }] };
+}
+
 /** Where-clause fragment every district-owned query must spread in. */
 export function scope(user: SessionUser) {
   return { districtId: districtOf(user) };

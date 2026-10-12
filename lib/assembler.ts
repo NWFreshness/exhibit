@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import type { PrismaClient } from "@prisma/client";
 import { writeRestricted } from "./llm";
 import { esc } from "./escape";
+import { clauseScope } from "./tenancy";
 
 export type Answers = {
   stance?: string;
@@ -35,22 +36,46 @@ export type Assembled = {
   clauseRefs: ClauseRef[];
   toolHash: string;
   answersHash: string;
+  /** What a review seat signs: the answers hash plus the stored purpose text. */
+  draftHash: string;
+  /** The purpose paragraph in use: stored draft text, fresh model text, or "". */
+  purpose: string;
   html: string;
   inUseCount: number;
 };
 
-export async function familyLetter(db: PrismaClient, districtId: string): Promise<string> {
+/** Languages a district may add to the family letter. */
+export const FAMILY_LANGUAGES = ["Spanish", "Vietnamese", "Russian", "Ukrainian", "Somali", "Chinese", "Arabic", "Tagalog", "Korean"] as const;
+export type FamilyTranslations = Record<string, { text: string; reviewed: boolean }>;
+
+/** The printed guidance for one tool: the limit, then the teacher guidance.
+ *  Internal notes never print. */
+export function guidanceText(t: { limitText?: string | null; teacherGuidance?: string | null }): string {
+  return [t.limitText, t.teacherGuidance].map((v) => (v ?? "").trim()).filter(Boolean).join(" ");
+}
+
+/** Ask the model for the family letter. `translate` asks for the same letter
+ *  in another language, from the given source text. Plain text out. */
+export async function familyLetterText(
+  db: PrismaClient,
+  districtId: string,
+  translate?: { language: string; sourceText: string }
+): Promise<string> {
   const district = await db.district.findUniqueOrThrow({ where: { id: districtId } });
   const row = await db.questionnaireAnswer.findUnique({ where: { districtId } });
   const a = (row?.answers ?? {}) as Answers;
-  const tools = await db.districtTool.findMany({ where: { districtId, inUse: true } });
-  const text = await writeRestricted("family", {
+  const tools = await db.districtTool.findMany({ where: { districtId, inUse: true, archivedAt: null } });
+  return writeRestricted("family", {
     districtName: district.name,
     rupName: a.rupName || "the Responsible Use Policy",
     approved: tools.filter((t) => t.decision === "approved").map((t) => t.rawName),
     limited: tools.filter((t) => t.decision === "limited").map((t) => t.rawName),
+    ...(translate ?? {}),
   });
-  return `<p>${esc(text)}</p>`;
+}
+
+export async function familyLetter(db: PrismaClient, districtId: string): Promise<string> {
+  return `<p>${esc(await familyLetterText(db, districtId))}</p>`;
 }
 
 export type AgreementPointerSummary = {
@@ -124,6 +149,13 @@ export function resolvedToolBands(
   };
 }
 
+/** An untouched staff request: still on hold, entered by the request form.
+ *  Anyone can create one without a login, so it stays out of the hash, the
+ *  snapshot, and the diff until the council decides on it. */
+export function isOpenRequest(t: { source?: string | null; decision: string }): boolean {
+  return t.source === "request" && t.decision === "hold";
+}
+
 export function toolTableHash(tools: Array<Record<string, unknown>>): string {
   const canon = [...tools]
     .sort((a, b) => String(a.rawName).localeCompare(String(b.rawName)))
@@ -134,12 +166,50 @@ export function toolTableHash(tools: Array<Record<string, unknown>>): string {
       integrityK5Override: t.integrityK5Override ?? null,
       integrity68Override: t.integrity68Override ?? null,
       integrity912Override: t.integrity912Override ?? null,
+      // Printed guidance is part of the published list. Added only when set,
+      // so hashes pinned before these fields existed still match.
+      ...(t.limitText ? { limitText: t.limitText } : {}),
+      ...(t.teacherGuidance ? { teacherGuidance: t.teacherGuidance } : {}),
       agreementPointer: latestPointerSummary(
         (t.agreements as Parameters<typeof latestPointerSummary>[0]) ??
           ((t.agreementPointer as unknown as Parameters<typeof latestPointerSummary>[0]) || null)
       ),
     }));
   return createHash("sha256").update(JSON.stringify(canon)).digest("hex");
+}
+
+/** One tool row as pinned into a snapshot or a published tool list. Bands are
+ *  resolved against the given answers: the tool override wins when set. */
+export function pinToolRow(
+  t: {
+    rawName: string; category: string; aiStatus: string; agreementStatus: string; decision: string;
+    notes: string; teacherGuidance: string; limitText: string; exhibitOverride: unknown;
+    integrityK5Override: string | null; integrity68Override: string | null; integrity912Override: string | null;
+    agreements?: Parameters<typeof latestPointerSummary>[0];
+  },
+  answers: Answers
+) {
+  // Pin the citation triple alongside the row fields so the cited fact
+  // survives exactly as adopted. Older/uncited rows keep nulls: no backfill.
+  const over = (t.exhibitOverride ?? {}) as Record<string, unknown>;
+  const triple = (k: string): string | null => typeof over[k] === "string" ? (over[k] as string) : null;
+  // Canonical pointer summary (spec 4.2, Q4): latest Agreement per tool.
+  const pointer = latestPointerSummary(t.agreements ?? null);
+  // Resolved grade-band triple (spec 4.5, Q4).
+  const bands = resolvedToolBands(t, answers);
+  return {
+    rawName: t.rawName, category: t.category, aiStatus: t.aiStatus,
+    agreementStatus: t.agreementStatus, decision: t.decision, notes: t.notes,
+    teacherGuidance: t.teacherGuidance, limitText: t.limitText,
+    citationUrl: triple("citationUrl"), citationDate: triple("citationDate"), citedBy: triple("citedBy"),
+    agreementKind: pointer?.kind ?? null,
+    registryUrl: pointer?.registryUrl ?? null,
+    registryId: pointer?.registryId ?? null,
+    originator: pointer?.originator ?? null,
+    integrityK5: bands.integrityK5,
+    integrity68: bands.integrity68,
+    integrity912: bands.integrity912,
+  };
 }
 
 const INTEGRITY_WORDS = {
@@ -155,15 +225,25 @@ function fillVars(body: string, a: Answers): string {
     .replaceAll("{{review_cadence}}", a.reviewCadence || "[cadence not set]");
 }
 
-export async function assemble(db: PrismaClient, districtId: string): Promise<Assembled> {
+/** The purpose paragraph comes from the stored draft text when there is one.
+ *  `prose: false` never calls the model: with no stored text, section 1 says
+ *  the paragraph is not written yet. Pages use it, so a view never costs a
+ *  model call. `prose: true` (actions only) asks the model when nothing is
+ *  stored; `regenerate` asks even when something is. */
+export async function assemble(
+  db: PrismaClient,
+  districtId: string,
+  opts: { prose: boolean; regenerate?: boolean } = { prose: true }
+): Promise<Assembled> {
   const district = await db.district.findUniqueOrThrow({ where: { id: districtId } });
   const row = await db.questionnaireAnswer.findUnique({ where: { districtId } });
   const a = (row?.answers ?? {}) as Answers;
   const tools = await db.districtTool.findMany({
-    where: { districtId },
+    where: { districtId, archivedAt: null },
     include: { catalogTool: true, agreements: { orderBy: { createdAt: "desc" } } },
     orderBy: { rawName: "asc" },
   });
+  const stored = (await db.draft.findFirst({ where: { districtId }, orderBy: { createdAt: "desc" } }))?.purposeText ?? "";
 
   const missing: string[] = [];
   if (!a.dataRule) missing.push("data rule");
@@ -205,13 +285,13 @@ export async function assemble(db: PrismaClient, districtId: string): Promise<As
   const clauseRefs: ClauseRef[] = [];
   const bodies: Record<string, string> = {};
   for (const [section, key, fallback] of picks) {
-    const id = key || (missing.includes(`${section} clause`) || section === "amendment" ? fallback : fallback);
+    const id = key || fallback;
     const clause =
       (await db.clause.findFirst({
-        where: { id, jurisdiction: district.state === "WA" ? { in: ["WA", "common"] } : "common", section },
+        where: { id, jurisdiction: district.state === "WA" ? { in: ["WA", "common"] } : "common", section, ...clauseScope(districtId) },
         orderBy: [{ jurisdiction: "desc" }, { version: "desc" }],
       })) ??
-      (await db.clause.findFirst({ where: { id, section }, orderBy: { version: "desc" } }));
+      (await db.clause.findFirst({ where: { id, section, ...clauseScope(districtId) }, orderBy: { version: "desc" } }));
     if (clause) {
       clauseRefs.push({ clauseId: clause.id, version: clause.version });
       bodies[section] = fillVars(clause.body, a);
@@ -228,12 +308,15 @@ export async function assemble(db: PrismaClient, districtId: string): Promise<As
     approved, limited,
     integrityK5: a.integrityK5, integrity68: a.integrity68, integrity912: a.integrity912,
   };
-  const purpose = await writeRestricted("purpose", ctx);
+  const purpose = stored && !opts.regenerate ? stored : opts.prose ? await writeRestricted("purpose", ctx) : "";
+  const purposeHtml = purpose
+    ? `<p>${esc(purpose)}</p>`
+    : `<p><i>The purpose paragraph is not written yet. Write it on the draft page.</i></p>`;
 
   const toolRows = (list: typeof tools) =>
     list.length
-      ? `<table><tr><th>Tool</th><th>AI status</th><th>Agreement</th><th>Decision</th><th>Note</th></tr>` +
-        list.map((t) => `<tr><td>${esc(t.rawName)}</td><td>${esc(t.aiStatus.replace(/_/g, " "))}</td><td>${esc(t.agreementStatus.replace(/_/g, " "))}</td><td>${esc(t.decision.toUpperCase())}</td><td>${esc(t.notes)}</td></tr>`).join("") +
+      ? `<table><tr><th>Tool</th><th>AI status</th><th>Agreement</th><th>Decision</th><th>Guidance</th></tr>` +
+        list.map((t) => `<tr><td>${esc(t.rawName)}</td><td>${esc(t.aiStatus.replace(/_/g, " "))}</td><td>${esc(t.agreementStatus.replace(/_/g, " "))}</td><td>${esc(t.decision.toUpperCase())}</td><td>${esc(guidanceText(t))}</td></tr>`).join("") +
         `</table>`
       : `<p>None.</p>`;
   const band = (label: string, v: Answers["integrityK5"]) =>
@@ -252,7 +335,7 @@ export async function assemble(db: PrismaClient, districtId: string): Promise<As
   const scopeLine = `<p>Scope: stance — <b>${esc(a.stance ? stanceWords[a.stance] ?? a.stance : "Decision missing.")}</b> Who may use AI — <b>${esc(a.whoMayUse ? whoWords[a.whoMayUse] ?? a.whoMayUse : "Decision missing.")}</b></p>`;
 
   const sections: Section[] = [
-    { n: 1, title: "Purpose and scope", html: `<p>${esc(purpose)}</p>${scopeLine}`, source: "Model-written paragraph, plus your stance and who-may-use answers. Change the answers in Questions." },
+    { n: 1, title: "Purpose and scope", html: `${purposeHtml}${scopeLine}`, source: "Model-written paragraph the owner can edit on the draft page, plus your stance and who-may-use answers." },
     { n: 2, title: "Principles", html: `<ul><li>Student safety and privacy come before convenience.</li><li>Unknown vendor facts are treated as unknown — never assumed safe.</li><li>Teachers retain professional judgment over any AI suggestion.</li><li>No automated system alone determines discipline or placement.</li></ul>`, source: "Fixed template — same for every district." },
     { n: 3, title: "Approved, limited, and prohibited tools",
       html: inUse.length === 0
@@ -276,7 +359,7 @@ export async function assemble(db: PrismaClient, districtId: string): Promise<As
       source: "Your amendment clause and choice. Change them in Questions." },
   ];
 
-  const toolHash = toolTableHash(tools);
+  const toolHash = toolTableHash(tools.filter((t) => !isOpenRequest(t)));
   const answersHash = createHash("sha256")
     .update(JSON.stringify({ answers: a, clauseRefs }))
     .digest("hex");
@@ -284,5 +367,8 @@ export async function assemble(db: PrismaClient, districtId: string): Promise<As
     `<p>District: ${esc(district.name)}</p>` +
     sections.map((s) => `<h2>${s.n}. ${esc(s.title)}</h2>${s.html}`).join("");
 
-  return { sections, missing, gate, clauseRefs, toolHash, answersHash, html, inUseCount: inUse.length };
+  // Seats sign the stored text only, so a fresh model call never lapses a signature by itself.
+  const draftHash = createHash("sha256").update(`${answersHash}\n${stored}`).digest("hex");
+
+  return { sections, missing, gate, clauseRefs, toolHash, answersHash, draftHash, purpose, html, inUseCount: inUse.length };
 }
