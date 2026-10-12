@@ -17,6 +17,9 @@ export type LlmContext = {
   toolDetails?: string;
   dataRule?: string;
   ownerName?: string;
+  /** Family letter only: write `sourceText` again in this language. */
+  language?: string;
+  sourceText?: string;
 };
 
 /** Test-visible log of every model call. Production code never reads this. */
@@ -30,6 +33,9 @@ function stubText(kind: AllowedKind, ctx: LlmContext): string {
       `staff and student use of generative AI tools, applies alongside ${ctx.rupName}, and ` +
       `treats any tool not listed as Approved as not permitted for student use until it clears review.`
     );
+  }
+  if (kind === "family" && ctx.language) {
+    return `[Sample text — connect a model key for a real ${ctx.language} translation] ${ctx.sourceText ?? ""}`;
   }
   if (kind === "family") {
     return (
@@ -65,12 +71,15 @@ export async function writeRestricted(kind: AllowedKind, ctx: LlmContext): Promi
   const system =
     kind === "purpose"
       ? "Write a short board-policy purpose paragraph. Plain civic language. No marketing, no emoji, no claims about vendors."
+      : kind === "family" && ctx.language
+        ? `Translate the family letter in sourceText into ${ctx.language}. Keep the meaning exact. Add nothing, drop nothing, keep tool names unchanged. Plain language. No marketing, no emoji.`
       : kind === "family"
         ? "Write a short one-page family letter about the district's AI tool rules. Plain language. No marketing, no emoji."
         : "Write a 15-minute principal training script (four timed blocks: 0-3 the rule, 3-7 walk the approved/limited list, 7-11 data rules, 11-15 acknowledgment). Plain warm language for school staff. Name only the tools given, never invent vendor facts or new tools. No marketing, no emoji.";
   const user = JSON.stringify(ctx);
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
+    signal: AbortSignal.timeout(20_000),
     headers: {
       "content-type": "application/json",
       ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),

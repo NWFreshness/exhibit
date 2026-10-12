@@ -32,7 +32,7 @@ export default async function RenewalsPage() {
 
   return (
     <Shell user={user} title="Renewals due">
-      <p className="sans">Flagged by the monthly pass — end dates approaching, lapsed agreements, and rows still on hold. Flags are rows, not emails. No vendor sites are ever checked.</p>
+      <p className="sans">Flagged by the monthly pass — end dates approaching, lapsed agreements, and rows still on hold. Each renewal owner also gets one email a month listing their flags, when a mail server is set up. No vendor sites are ever checked.</p>
       {canWrite(user) && (
         <form action={recheck} className="no-print"><button className="btn secondary" type="submit">Run the pass now</button></form>
       )}

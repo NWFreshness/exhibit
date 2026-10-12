@@ -6,7 +6,7 @@ import { redirect } from "next/navigation";
 export default async function SignInPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
   const u = await sessionUser();
   if (u) redirect("/");
-  const dev = !process.env.SMTP_HOST;
+  const dev = !process.env.SMTP_HOST && process.env.NODE_ENV !== "production";
   const google = Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
   const entra = Boolean(process.env.MICROSOFT_ENTRA_CLIENT_ID && process.env.MICROSOFT_ENTRA_CLIENT_SECRET);
   const err = (await searchParams).error;

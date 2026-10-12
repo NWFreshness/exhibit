@@ -15,7 +15,7 @@ export default async function RequestStatusPage({ params }: { params: Promise<{ 
       <table className="sans"><tr><th>Tool</th><th>Decision</th><th>Intended use</th></tr>
         <tr>
           <td>{s.toolName}</td>
-          <td>{s.decision.toUpperCase()}</td>
+          <td><span className="status" data-s={s.decision}>{s.decision.toUpperCase()}</span></td>
           <td>{s.intendedUse === "with_students" ? "Students would use it" : "Staff only"}</td>
         </tr>
       </table>

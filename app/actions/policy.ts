@@ -3,12 +3,16 @@ import { z } from "zod";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { sessionUser } from "@/lib/session";
-import { canWrite, isOwner, scope } from "@/lib/tenancy";
+import { canWrite, clauseScope, isOwner, scope } from "@/lib/tenancy";
 import { refuseStudentData } from "@/lib/guard";
 import { isCitationUrlValid, withCitation, inCitationQueue, mergedExhibit } from "@/lib/rubric";
-import { assemble, familyLetter, latestPointerSummary, resolvedToolBands, type Answers } from "@/lib/assembler";
+import { assemble, familyLetterText, isOpenRequest, pinToolRow, toolTableHash, FAMILY_LANGUAGES, type Answers, type Assembled, type FamilyTranslations } from "@/lib/assembler";
 import { boardLock, REQUIRED_SEATS, OPTIONAL_SEATS } from "@/lib/seats";
-import { buildTrainingPacket } from "@/lib/training";
+import { promoteClause } from "@/lib/clauses";
+import { buildTrainingPacket, guidanceOf, type SnapshotTool } from "@/lib/training";
+import { currentPolicy, toolListFor } from "@/lib/policy";
+import { esc } from "@/lib/escape";
+import { shareFinding } from "@/lib/shared";
 import { putBlob } from "@/lib/store";
 
 const band = z.enum(["red", "yellow", "green"]);
@@ -88,7 +92,7 @@ export async function addComment(input: { targetType: string; targetId: string; 
     const t = await prisma.districtTool.findFirst({ where: { id: parsed.data.targetId, districtId: user.districtId } });
     if (!t) return { error: "Tool not found in your district." };
   } else {
-    const c = await prisma.clause.findFirst({ where: { id: parsed.data.targetId } });
+    const c = await prisma.clause.findFirst({ where: { id: parsed.data.targetId, ...clauseScope(user.districtId) } });
     if (!c) return { error: "Clause not found." };
   }
   await prisma.comment.create({
@@ -121,11 +125,11 @@ export async function promoteProposal(id: string): Promise<{ error?: string }> {
   if (!user || !isOwner(user)) return { error: "Owner only." };
   const c = await prisma.comment.findFirst({ where: { id, districtId: user.districtId } });
   if (!c || c.targetType !== "clause" || !c.clauseId || !c.proposal) return { error: "Only propose-comments on clauses with replacement text can be promoted." };
-  const latest = await prisma.clause.findFirst({ where: { id: c.clauseId }, orderBy: { version: "desc" } });
-  if (!latest) return { error: "Clause not found." };
-  await prisma.clause.create({
-    data: { id: latest.id, version: latest.version + 1, jurisdiction: latest.jurisdiction, section: latest.section, title: `${latest.title} (rev ${latest.version + 1})`, body: c.proposal },
-  });
+  try {
+    await promoteClause(prisma, user.districtId, c.clauseId, c.proposal);
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : "Promotion failed." };
+  }
   await prisma.comment.update({ where: { id }, data: { status: "accepted" } });
   revalidatePath("/review");
   return {};
@@ -137,7 +141,11 @@ export async function signSeat(seat: string): Promise<{ error?: string }> {
   if (!user || !canWrite(user)) return { error: "Viewers cannot sign." };
   const s = await prisma.reviewSeat.findUnique({ where: { districtId_seat: { districtId: user.districtId, seat } } });
   if (!s) return { error: "Unknown seat." };
-  await prisma.reviewSeat.update({ where: { id: s.id }, data: { signedAt: new Date(), signedBy: `${user.email} (${user.role})`, overrideReason: null } });
+  if (s.assignedEmail && s.assignedEmail !== user.email.toLowerCase()) {
+    return { error: `This seat is assigned to ${s.assignedEmail}. Only they can sign it; the owner can record an override.` };
+  }
+  const { draftHash } = await assemble(prisma, user.districtId, { prose: false });
+  await prisma.reviewSeat.update({ where: { id: s.id }, data: { signedAt: new Date(), signedBy: `${user.email} (${user.role})`, overrideReason: null, signedHash: draftHash } });
   revalidatePath("/review");
   return {};
 }
@@ -150,7 +158,8 @@ export async function overrideSeat(seat: string, reason: string): Promise<{ erro
   if (blocked) return { error: blocked };
   const s = await prisma.reviewSeat.findUnique({ where: { districtId_seat: { districtId: user.districtId, seat } } });
   if (!s) return { error: "Unknown seat." };
-  await prisma.reviewSeat.update({ where: { id: s.id }, data: { signedAt: null, signedBy: null, overrideReason: `${user.email}: ${reason.trim().slice(0, 1000)}` } });
+  const { draftHash } = await assemble(prisma, user.districtId, { prose: false });
+  await prisma.reviewSeat.update({ where: { id: s.id }, data: { signedAt: null, signedBy: null, overrideReason: `${user.email}: ${reason.trim().slice(0, 1000)}`, signedHash: draftHash } });
   revalidatePath("/review");
   return {};
 }
@@ -173,6 +182,8 @@ export async function citeFinding(input: {
   trainingAddressed?: string;
   citationUrl: string;
   citationDate?: string;
+  /** Also offer this cited finding to other districts (no district named). */
+  share?: boolean;
 }): Promise<{ error?: string; field?: string }> {
   const user = await sessionUser();
   if (!user || !canWrite(user)) return { error: "Read-only role." };
@@ -193,10 +204,8 @@ export async function citeFinding(input: {
   let date = (input.citationDate || "").trim().slice(0, 10);
   if (!date) date = new Date().toISOString().slice(0, 10);
   else if (!dateRe.test(date)) return { error: "Citation date must be YYYY-MM-DD.", field: "citationDate" };
-  for (const v of [url, date, user.email]) {
-    const blocked = refuseStudentData(v);
-    if (blocked) return { error: blocked };
-  }
+  const blocked = refuseStudentData(url);
+  if (blocked) return { error: blocked };
   // District-scoped lookup: another district's id resolves to the same
   // generic "Not found." as a missing row, so no existence signal leaks.
   const tool = await prisma.districtTool.findFirst({
@@ -219,90 +228,235 @@ export async function citeFinding(input: {
     { citationUrl: url, citationDate: date, citedBy: user.email }
   );
   await prisma.districtTool.update({ where: { id: tool.id }, data: { exhibitOverride: JSON.parse(JSON.stringify(next)) } });
+  if (input.share && tool.catalogToolId) {
+    await shareFinding(prisma, user.districtId, tool.catalogToolId,
+      { usedForTraining, trainingAddressed }, { citationUrl: url, citationDate: date });
+  }
   revalidatePath("/review");
   return {};
 }
 
-// ---- Draft + adopt ----
+/** Take another district's shared finding into this district's own record.
+ *  Nothing merges until this runs; the citation keeps the original source. */
+export async function acceptSharedFinding(toolId: string, findingId: string): Promise<{ error?: string }> {
+  const user = await sessionUser();
+  if (!user || !canWrite(user)) return { error: "Read-only role." };
+  const tool = await prisma.districtTool.findFirst({ where: { id: toolId, ...scope(user) } });
+  if (!tool || !tool.catalogToolId) return { error: "Not found." };
+  const f = await prisma.sharedFinding.findFirst({ where: { id: findingId, catalogToolId: tool.catalogToolId } });
+  if (!f || (f.key !== "usedForTraining" && f.key !== "trainingAddressed")) return { error: "Not found." };
+  const next = withCitation(
+    (tool.exhibitOverride ?? {}) as Record<string, unknown>,
+    { [f.key]: f.value },
+    { citationUrl: f.citationUrl, citationDate: f.citationDate, citedBy: user.email }
+  );
+  await prisma.districtTool.update({ where: { id: tool.id }, data: { exhibitOverride: JSON.parse(JSON.stringify(next)) } });
+  revalidatePath(`/tools/${tool.id}`);
+  revalidatePath("/review");
+  return {};
+}
+
+// ---- Draft, model-written text, approval, board adoption, tool list ----
+
+/** Write the working draft row, keeping the model-written text it already has. */
+async function saveDraft(districtId: string, out: Assembled, prose: { purposeText?: string; familyText?: string; familyTranslations?: FamilyTranslations } = {}) {
+  const data = { clauseRefs: out.clauseRefs, toolHash: out.toolHash, answersHash: out.answersHash, html: out.html, ...prose };
+  const existing = await prisma.draft.findFirst({ where: { districtId }, orderBy: { createdAt: "desc" } });
+  if (existing) return prisma.draft.update({ where: { id: existing.id }, data });
+  return prisma.draft.create({ data: { districtId, ...data } });
+}
+
 export async function refreshDraft(): Promise<{ error?: string }> {
   const user = await sessionUser();
   if (!user || !canWrite(user)) return { error: "Read-only role." };
-  const out = await assemble(prisma, user.districtId);
-  await prisma.draft.deleteMany({ where: { districtId: user.districtId } });
-  await prisma.draft.create({
-    data: { districtId: user.districtId, clauseRefs: out.clauseRefs, toolHash: out.toolHash, answersHash: out.answersHash, html: out.html },
-  });
+  await saveDraft(user.districtId, await assemble(prisma, user.districtId, { prose: false }));
   revalidatePath("/draft");
   return {};
 }
 
+/** Ask the model for the purpose paragraph and the family letter and store
+ *  both on the draft. Overwrites any edits; translations are cleared because
+ *  they no longer match. This is the only place a page click calls the model
+ *  for these two texts. */
+export async function writeProse(): Promise<{ error?: string }> {
+  const user = await sessionUser();
+  if (!user || !canWrite(user)) return { error: "Read-only role." };
+  try {
+    const out = await assemble(prisma, user.districtId, { prose: true, regenerate: true });
+    const familyText = await familyLetterText(prisma, user.districtId);
+    await saveDraft(user.districtId, out, { purposeText: out.purpose, familyText, familyTranslations: {} });
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : "Generation failed." };
+  }
+  revalidatePath("/draft");
+  return {};
+}
+
+/** Owner edit of the two model-written texts. Editing lapses seat signatures. */
+export async function saveProse(purposeText: string, familyText: string): Promise<{ error?: string }> {
+  const user = await sessionUser();
+  if (!user || !isOwner(user)) return { error: "Owner only." };
+  const purpose = purposeText.trim().slice(0, 4000);
+  const family = familyText.trim().slice(0, 6000);
+  if (!purpose || !family) return { error: "Both texts are required. Use Write with AI to start." };
+  const blocked = refuseStudentData(purpose) || refuseStudentData(family);
+  if (blocked) return { error: blocked };
+  const out = await assemble(prisma, user.districtId, { prose: false });
+  await saveDraft(user.districtId, out, { purposeText: purpose, familyText: family });
+  // Re-save so the stored draft html carries the edited paragraph.
+  await saveDraft(user.districtId, await assemble(prisma, user.districtId, { prose: false }));
+  revalidatePath("/draft");
+  return {};
+}
+
+/** Add or redo one translation of the stored family letter. Machine text
+ *  starts unreviewed; a person marks it reviewed in saveTranslation. */
+export async function translateFamily(language: string): Promise<{ error?: string }> {
+  const user = await sessionUser();
+  if (!user || !canWrite(user)) return { error: "Read-only role." };
+  if (!(FAMILY_LANGUAGES as readonly string[]).includes(language)) return { error: "Unknown language." };
+  const draft = await prisma.draft.findFirst({ where: { districtId: user.districtId }, orderBy: { createdAt: "desc" } });
+  if (!draft?.familyText) return { error: "Write the family letter first." };
+  let text: string;
+  try {
+    text = await familyLetterText(prisma, user.districtId, { language, sourceText: draft.familyText });
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : "Translation failed." };
+  }
+  const all = { ...((draft.familyTranslations ?? {}) as FamilyTranslations), [language]: { text, reviewed: false } };
+  await prisma.draft.update({ where: { id: draft.id }, data: { familyTranslations: all } });
+  revalidatePath("/draft");
+  return {};
+}
+
+export async function saveTranslation(language: string, text: string, reviewed: boolean): Promise<{ error?: string }> {
+  const user = await sessionUser();
+  if (!user || !isOwner(user)) return { error: "Owner only." };
+  const draft = await prisma.draft.findFirst({ where: { districtId: user.districtId }, orderBy: { createdAt: "desc" } });
+  const all = { ...((draft?.familyTranslations ?? {}) as FamilyTranslations) };
+  if (!draft || !all[language]) return { error: "Not found." };
+  const body = text.trim().slice(0, 8000);
+  if (!body) delete all[language];
+  else {
+    const blocked = refuseStudentData(body);
+    if (blocked) return { error: blocked };
+    all[language] = { text: body, reviewed };
+  }
+  await prisma.draft.update({ where: { id: draft.id }, data: { familyTranslations: all } });
+  revalidatePath("/draft");
+  return {};
+}
+
+/** Live tool rows pinned for a snapshot or a published list. Archived rows and
+ *  open staff requests stay out. */
+async function pinnedTools(districtId: string, answers: Answers) {
+  const tools = (await prisma.districtTool.findMany({
+    where: { districtId, archivedAt: null },
+    orderBy: { rawName: "asc" },
+    include: { agreements: { orderBy: { createdAt: "desc" } } },
+  })).filter((t) => !isOpenRequest(t));
+  return {
+    toolHash: toolTableHash(tools),
+    toolTable: JSON.parse(JSON.stringify(tools.map((t) => pinToolRow(t, answers)))) as SnapshotTool[],
+  };
+}
+
+/** Council approval: freezes the policy text and the tool list as a snapshot.
+ *  It is not in force, public, or trained on until the board adopts it
+ *  (recordBoardAdoption). */
 export async function adoptSnapshot(): Promise<{ error?: string; id?: string }> {
   const user = await sessionUser();
   if (!user || !isOwner(user)) return { error: "Owner only." };
-  const lock = await boardLock(prisma, user.districtId);
-  if (lock.locked) return { error: `Board packet is locked. ${lock.reason} Sign all required seats or record an owner override with a reason.` };
   const out = await assemble(prisma, user.districtId);
+  const lock = await boardLock(prisma, user.districtId, out.draftHash);
+  if (lock.locked) return { error: `Board packet is locked. ${lock.reason} Sign all required seats or record an owner override with a reason.` };
   if (out.gate.length) return { error: `Cannot adopt: ${out.gate.join("; ")}.` };
-  const tools = await prisma.districtTool.findMany({
-    where: { districtId: user.districtId },
-    orderBy: { rawName: "asc" },
-    include: { agreements: { orderBy: { createdAt: "desc" } } },
-  });
   const district = await prisma.district.findUniqueOrThrow({ where: { id: user.districtId } });
   const qRow = await prisma.questionnaireAnswer.findUnique({ where: { districtId: user.districtId } });
+  const answers = (qRow?.answers ?? {}) as Answers;
+  const draft = await prisma.draft.findFirst({ where: { districtId: user.districtId }, orderBy: { createdAt: "desc" } });
+  // Model call first: if it fails, nothing is adopted and a retry is clean.
+  let famText = draft?.familyText ?? "";
+  if (!famText) {
+    try {
+      famText = await familyLetterText(prisma, user.districtId);
+    } catch (e) {
+      return { error: `Cannot adopt: the family letter could not be written. ${e instanceof Error ? e.message : ""}`.trim() };
+    }
+  }
+  const translations = (draft?.familyTranslations ?? {}) as FamilyTranslations;
+  const pinned = await pinnedTools(user.districtId, answers);
   const snap = await prisma.adoptedSnapshot.create({
     data: {
       districtId: user.districtId, adoptedBy: user.email,
       clauseRefs: out.clauseRefs, toolHash: out.toolHash, answersHash: out.answersHash,
-      answersJson: (qRow?.answers ?? {}) as object,
-      toolTable: JSON.parse(JSON.stringify(tools.map((t) => {
-        // Pin the citation triple alongside the row fields so the cited fact
-        // survives exactly as adopted. Older/uncited rows keep nulls: no backfill.
-        const over = (t.exhibitOverride ?? {}) as Record<string, unknown>;
-        const triple = (k: string): string | null => typeof over[k] === "string" ? (over[k] as string) : null;
-        // Pin the canonical pointer summary (spec 4.2, Q4): latest Agreement
-        // per tool; nulls when the tool has no agreement. Same shape as the hash.
-        const pointer = latestPointerSummary(t.agreements ?? null);
-        // Pin the resolved grade-band triple (spec 4.5, Q4): the tool override
-        // wins when set, otherwise the questionnaire band at adopt. Rows from
-        // older snapshots lack these keys: "not recorded at adoption."
-        const bands = resolvedToolBands(t, (qRow?.answers ?? {}) as Answers);
-        return {
-          rawName: t.rawName, category: t.category, aiStatus: t.aiStatus,
-          agreementStatus: t.agreementStatus, decision: t.decision, notes: t.notes,
-          citationUrl: triple("citationUrl"), citationDate: triple("citationDate"), citedBy: triple("citedBy"),
-          agreementKind: pointer?.kind ?? null,
-          registryUrl: pointer?.registryUrl ?? null,
-          registryId: pointer?.registryId ?? null,
-          originator: pointer?.originator ?? null,
-          integrityK5: bands.integrityK5,
-          integrity68: bands.integrity68,
-          integrity912: bands.integrity912,
-        };
-      }))),
+      answersJson: answers as object,
+      toolTable: pinned.toolTable as object[],
       html: out.html,
+      familyText: famText, familyTranslations: translations,
     },
   });
-  const fam = await familyLetter(prisma, user.districtId);
+  await prisma.toolListVersion.create({
+    data: { districtId: user.districtId, snapshotId: snap.id, publishedBy: user.email, toolHash: pinned.toolHash, toolTable: pinned.toolTable as object[] },
+  });
   const packet = buildTrainingPacket({
     districtName: district.name, adoptedOn: snap.adoptedAt.toISOString().slice(0, 10),
-    adoptedBy: user.email, stale: false,
-    tools: (snap.toolTable as Array<{ rawName: string; aiStatus: string; agreementStatus: string; decision: string; notes: string }>),
+    adoptedBy: user.email, stale: false, tools: pinned.toolTable,
   });
-  const stored = await putBlob(
-    `exports/${user.districtId}/${snap.id}.html`,
-    `<!doctype html><html><head><meta charset="utf-8"><title>Adopted packet</title></head><body>${out.html}<hr>${fam}<hr>${packet.principalScript}${packet.teacherCard}</body></html>`,
-    "text/html"
-  );
-  await prisma.adoptedSnapshot.update({ where: { id: snap.id }, data: { exportKey: stored.key } });
-  await prisma.draft.deleteMany({ where: { districtId: user.districtId } });
-  await prisma.draft.create({
-    data: { districtId: user.districtId, clauseRefs: out.clauseRefs, toolHash: out.toolHash, answersHash: out.answersHash, html: out.html },
-  });
+  // The snapshot is the record; the export file is a copy. A storage failure
+  // leaves exportKey null instead of reporting a failed adoption.
+  try {
+    const stored = await putBlob(
+      `exports/${user.districtId}/${snap.id}.html`,
+      `<!doctype html><html><head><meta charset="utf-8"><title>Adopted packet</title></head><body>${out.html}<hr><p>${esc(famText)}</p><hr>${packet.principalScript}${packet.teacherCard}</body></html>`,
+      "text/html"
+    );
+    await prisma.adoptedSnapshot.update({ where: { id: snap.id }, data: { exportKey: stored.key } });
+  } catch (e) {
+    console.error("[adopt] export not stored:", e instanceof Error ? e.message.slice(0, 300) : e);
+  }
+  await saveDraft(user.districtId, out, { purposeText: out.purpose, familyText: famText });
   revalidatePath("/draft");
   revalidatePath("/snapshot");
   revalidatePath("/");
   return { id: snap.id };
+}
+
+const isoDate = /^\d{4}-\d{2}-\d{2}$/;
+
+/** The board vote. Puts a council-approved snapshot in force. */
+export async function recordBoardAdoption(snapshotId: string, date: string, resolution: string): Promise<{ error?: string }> {
+  const user = await sessionUser();
+  if (!user || !isOwner(user)) return { error: "Owner only." };
+  const snap = await prisma.adoptedSnapshot.findFirst({ where: { id: snapshotId, districtId: user.districtId } });
+  if (!snap) return { error: "Not found." };
+  if (!isoDate.test(date) || Number.isNaN(new Date(date + "T00:00:00").getTime())) return { error: "Board meeting date must be YYYY-MM-DD." };
+  const res = resolution.trim().slice(0, 120);
+  const blocked = refuseStudentData(res);
+  if (blocked) return { error: blocked };
+  await prisma.adoptedSnapshot.update({
+    where: { id: snap.id },
+    data: { boardAdoptedOn: new Date(date + "T00:00:00"), boardResolution: res || null },
+  });
+  for (const p of ["/snapshot", "/draft", "/training", "/", `/exhibit/${user.districtId}`]) revalidatePath(p);
+  return {};
+}
+
+/** Publish the live tool list under the policy in force. No seat sign-off and
+ *  no board vote: the policy text is untouched. Grade bands resolve against
+ *  the adopted answers, not unadopted edits. */
+export async function publishToolList(): Promise<{ error?: string; id?: string }> {
+  const user = await sessionUser();
+  if (!user || !isOwner(user)) return { error: "Owner only." };
+  const policy = await currentPolicy(prisma, user.districtId);
+  if (!policy) return { error: "No policy is in force yet. The board must adopt one first." };
+  const live = (await prisma.questionnaireAnswer.findUnique({ where: { districtId: user.districtId } }))?.answers;
+  const pinned = await pinnedTools(user.districtId, (policy.answersJson ?? live ?? {}) as Answers);
+  const v = await prisma.toolListVersion.create({
+    data: { districtId: user.districtId, snapshotId: policy.id, publishedBy: user.email, toolHash: pinned.toolHash, toolTable: pinned.toolTable as object[] },
+  });
+  for (const p of ["/draft", "/training", "/", `/exhibit/${user.districtId}`]) revalidatePath(p);
+  return { id: v.id };
 }
 
 export async function ackTraining(snapshotId: string, name: string, schoolId?: string): Promise<{ error?: string }> {
@@ -320,7 +474,8 @@ export async function ackTraining(snapshotId: string, name: string, schoolId?: s
     if (!s) return { error: "Unknown building." };
     school = s.id;
   }
-  await prisma.trainingAck.create({ data: { districtId: user.districtId, snapshotId: snap.id, name: nm, schoolId: school } });
+  const toolListId = (await toolListFor(prisma, snap)).versionId;
+  await prisma.trainingAck.create({ data: { districtId: user.districtId, snapshotId: snap.id, toolListId, name: nm, schoolId: school } });
   revalidatePath("/training");
   return {};
 }
@@ -335,7 +490,7 @@ export async function generateTrainingScript(snapshotId: string): Promise<{ erro
   if (!snap) return { error: "Snapshot not found." };
   const district = await prisma.district.findUniqueOrThrow({ where: { id: user.districtId } });
   const answers = ((snap.answersJson ?? {}) as Record<string, string>);
-  const tools = (snap.toolTable ?? []) as Array<{ rawName: string; decision: string; notes: string; category?: string }>;
+  const tools = ((await toolListFor(prisma, snap)).toolTable ?? []) as SnapshotTool[];
   const usable = tools.filter((t) => t.decision === "approved" || t.decision === "limited");
   const { writeRestricted } = await import("@/lib/llm");
   let body: string;
@@ -345,7 +500,7 @@ export async function generateTrainingScript(snapshotId: string): Promise<{ erro
       rupName: answers.rupName || "the Responsible Use Policy",
       approved: usable.filter((t) => t.decision === "approved").map((t) => t.rawName),
       limited: usable.filter((t) => t.decision === "limited").map((t) => t.rawName),
-      toolDetails: usable.map((t) => `${t.rawName} (${t.decision}${t.notes ? `: ${t.notes}` : ""})`).join(" "),
+      toolDetails: usable.map((t) => `${t.rawName} (${t.decision}${guidanceOf(t) ? `: ${guidanceOf(t)}` : ""})`).join(" "),
       dataRule: answers.dataRule,
       ownerName: answers.ownerName,
     });

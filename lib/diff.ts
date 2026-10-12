@@ -13,6 +13,8 @@ export type LiveRowInput = {
   decision?: unknown;
   inUse?: unknown;
   notes?: unknown;
+  teacherGuidance?: unknown;
+  limitText?: unknown;
   exhibitOverride?: unknown;
   agreements?: Array<{
     kind?: string | null;
@@ -45,7 +47,9 @@ export const DIFF_FIELDS: Array<[key: string, label: string]> = [
   ["aiStatus", "AI status"],
   ["agreementStatus", "Agreement"],
   ["inUse", "In use"],
-  ["notes", "Note"],
+  ["notes", "Internal note"],
+  ["limitText", "Limit"],
+  ["teacherGuidance", "Teacher guidance"],
   ["citationUrl", "Citation URL"],
   ["citationDate", "Citation date"],
   ["citedBy", "Cited by"],
@@ -87,6 +91,8 @@ export function normalizeLiveRow(tool: LiveRowInput, answers: BandAnswers): Pinn
     decision: tool.decision ?? null,
     inUse: tool.inUse ?? null,
     notes: tool.notes ?? null,
+    limitText: tool.limitText || null,
+    teacherGuidance: tool.teacherGuidance || null,
     citationUrl: triple("citationUrl"),
     citationDate: triple("citationDate"),
     citedBy: triple("citedBy"),

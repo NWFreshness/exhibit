@@ -4,7 +4,8 @@ import Google from "next-auth/providers/google";
 import MicrosoftEntra from "next-auth/providers/microsoft-entra-id";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@/lib/prisma";
-import { resolveLogin } from "@/lib/domain";
+import { admitLogin } from "@/lib/domain";
+import { sendMail } from "@/lib/mail";
 
 // Dev outbox: with no SMTP configured, magic links are shown on screen
 // (signin page "dev pickup") instead of emailed. Production sets SMTP_*.
@@ -35,18 +36,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           console.log(`[exhibit dev] magic link for ${identifier}: ${url}`);
           return;
         }
-        const nodemailer = (await import("nodemailer")).default;
-        const transport = nodemailer.createTransport({
-          host: process.env.SMTP_HOST,
-          port: Number(process.env.SMTP_PORT || 587),
-          auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-        });
-        await transport.sendMail({
-          to: identifier,
-          from: process.env.EMAIL_FROM,
-          subject: "Sign in to Exhibit",
-          text: `Sign in to Exhibit:\n\n${url}\n\nExpires in 24 hours.`,
-        });
+        await sendMail(identifier, "Sign in to Exhibit", `Sign in to Exhibit:\n\n${url}\n\nExpires in 24 hours.`);
       },
     }),
     ...(googleOn ? [Google] : []),
@@ -65,28 +55,10 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   callbacks: {
     // District gate: invite > existing user > allowed domain. Anything else is
     // rejected before a session exists. Applies to magic link AND OAuth.
-    async signIn({ user }) {
-      const email = (user.email || "").toLowerCase().trim();
-      if (!email) return false;
-      const r = await resolveLogin(prisma, email);
-      if (!r) return "/signin?error=domain";
-      const now = new Date();
-      await prisma.user.upsert({
-        where: { email },
-        update: { districtId: r.districtId, role: r.role },
-        create: { email, districtId: r.districtId, role: r.role, createdAt: now },
-      });
-      if (r.inviteId) {
-        await prisma.invite.update({ where: { id: r.inviteId }, data: { acceptedAt: now } });
-        if (r.seat) {
-          await prisma.reviewSeat.upsert({
-            where: { districtId_seat: { districtId: r.districtId, seat: r.seat } },
-            update: { assignedEmail: email },
-            create: { districtId: r.districtId, seat: r.seat, required: false, assignedEmail: email },
-          });
-        }
-      }
-      return true;
+    async signIn({ user, email }) {
+      if (!user.email) return false;
+      const ok = await admitLogin(prisma, user.email, Boolean(email?.verificationRequest));
+      return ok || "/signin?error=domain";
     },
   },
 });

@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { sessionUser } from "@/lib/session";
-import { canWrite } from "@/lib/tenancy";
+import { canWrite, clauseScope } from "@/lib/tenancy";
 import { esc } from "@/lib/escape";
 
 // Owner download: DPA/no-training request letter rendered from the clause
@@ -20,7 +20,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const district = await prisma.district.findUniqueOrThrow({ where: { id: user.districtId } });
   const row = await prisma.questionnaireAnswer.findUnique({ where: { districtId: user.districtId } });
   const answers = (row?.answers ?? {}) as Record<string, string>;
-  const clause = await prisma.clause.findFirst({ where: { id: "dpa_request" }, orderBy: { version: "desc" } });
+  const clause = await prisma.clause.findFirst({ where: { id: "dpa_request", ...clauseScope(user.districtId) }, orderBy: { version: "desc" } });
   const today = new Date().toISOString().slice(0, 10);
   const vars: Record<string, string> = {
     vendor_contact: tool.vendorContact || "[vendor contact]",

@@ -11,6 +11,9 @@ export type ExhibitRow = {
   bands: ExhibitBand;
   /** True when the row predates per-tool bands and fell back to answers. */
   legacyBands: boolean;
+  /** Teacher guidance plus the limit. Set only when the row carries them:
+   *  internal notes are never a fallback here. */
+  guidance?: string;
 };
 
 export type ExhibitList = { rows: ExhibitRow[]; legacyBands: boolean };
@@ -44,7 +47,10 @@ export function projectExhibitRows(toolTable: unknown, answersJson: unknown): Ex
     if (typeof row.rawName !== "string" || typeof row.decision !== "string") continue;
     const legacy = !hasBandKeys(row);
     if (legacy) legacyBands = true;
+    const guidance = [row.limitText, row.teacherGuidance]
+      .map((v) => (typeof v === "string" ? v.trim() : "")).filter(Boolean).join(" ");
     rows.push({
+      ...(guidance ? { guidance } : {}),
       name: row.rawName,
       decision: row.decision,
       bands: {

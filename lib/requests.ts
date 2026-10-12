@@ -58,7 +58,7 @@ export async function createToolRequest(
 
   // Duplicate name in the same district links to the existing row.
   const existing = await db.districtTool.findFirst({
-    where: { districtId, rawName: { equals: name, mode: "insensitive" } },
+    where: { districtId, archivedAt: null, rawName: { equals: name, mode: "insensitive" } },
   });
   if (existing) {
     const req = await db.toolRequest.create({
@@ -87,7 +87,9 @@ export async function createToolRequest(
       aiStatus: "unknown",
       agreementStatus: "not_requested",
       decision: "hold",
-      notes: input.note ? `Requested: ${input.note.slice(0, 500)}` : "Requested by staff.",
+      // The requester's words stay on the ToolRequest row. Tool notes print in
+      // the board draft and the teacher card, so they never take anonymous text.
+      notes: "Requested by staff.",
     },
   });
   await db.decisionEvent.create({
@@ -108,6 +110,17 @@ export async function createToolRequest(
     },
   });
   return { toolId: tool.id, requestId: req.id, existing: false, statusToken: req.statusToken! };
+}
+
+export const PUBLIC_REQUESTS_PER_DAY = 50;
+
+/** Throws once a district has taken its daily share of requests.
+ *  shortcut: one shared cap per district, so a flood also blocks real staff
+ *  for the day; move to per-IP limits at the edge when that happens. */
+export async function assertPublicRequestCap(db: PrismaClient, districtId: string): Promise<void> {
+  const since = new Date(Date.now() - 86_400_000);
+  const n = await db.toolRequest.count({ where: { districtId, createdAt: { gte: since } } });
+  if (n >= PUBLIC_REQUESTS_PER_DAY) throw new Error("Too many requests today. Try again tomorrow, or ask the council owner.");
 }
 
 /** Public status read (spec 4.6, Q4): the token is the scope. Returns only the
@@ -148,5 +161,5 @@ export async function mintRequestToken(
 
 /** Open requests: request-sourced rows still on hold. */
 export async function openRequestCount(db: PrismaClient, districtId: string): Promise<number> {
-  return db.districtTool.count({ where: { districtId, source: "request", decision: "hold" } });
+  return db.districtTool.count({ where: { districtId, archivedAt: null, source: "request", decision: "hold" } });
 }

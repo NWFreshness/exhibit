@@ -3,9 +3,11 @@ import { notFound } from "next/navigation";
 import { Shell } from "@/app/shell";
 import { requireUser } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
-import { canWrite } from "@/lib/tenancy";
+import { canWrite, isOwner } from "@/lib/tenancy";
 import { evaluateRubric, mergedExhibit, overrideKeys, type AiStatus, type AgreementStatus } from "@/lib/rubric";
-import { updateTool, uploadAgreement, recordAlliancePointer } from "@/app/actions/tools";
+import { updateTool, uploadAgreement, recordAlliancePointer, archiveTool, renameTool, mergeTool } from "@/app/actions/tools";
+import { acceptSharedFinding } from "@/app/actions/policy";
+import { sharedFindingsFor } from "@/lib/shared";
 
 function V({ v, district }: { v: string | boolean | null | undefined; district?: boolean }) {
   const body = v === null || v === undefined || v === "" ? <span className="unknown">Unknown</span>
@@ -55,6 +57,8 @@ export default async function ToolPage({ params }: { params: Promise<{ id: strin
       aiStatus: String(form.get("aiStatus") || t.aiStatus),
       inUse: form.get("inUse") === "on",
       notes: String(form.get("notes") || ""),
+      teacherGuidance: String(form.get("teacherGuidance") || ""),
+      limitText: String(form.get("limitText") || ""),
       override: ov,
       agreementEndsOn: String(form.get("agreementEndsOn") || ""),
       renewalOwnerUserId: String(form.get("renewalOwnerUserId") || ""),
@@ -64,6 +68,10 @@ export default async function ToolPage({ params }: { params: Promise<{ id: strin
       integrity912: String(form.get("band_912") || ""),
     });
   }
+  async function archive() { "use server"; await archiveTool(t.id, !t.archivedAt); }
+  async function rename(form: FormData) { "use server"; await renameTool(t.id, String(form.get("name") || "")); }
+  async function merge(form: FormData) { "use server"; await mergeTool(t.id, String(form.get("dropId") || "")); }
+  async function accept(form: FormData) { "use server"; await acceptSharedFinding(t.id, String(form.get("findingId") || "")); }
   async function upload(form: FormData) {
     "use server";
     await uploadAgreement(t.id, form);
@@ -93,10 +101,23 @@ export default async function ToolPage({ params }: { params: Promise<{ id: strin
   const cat = t.catalogTool;
   const members = await prisma.user.findMany({ where: { districtId: user.districtId }, orderBy: { email: "asc" }, select: { id: true, email: true, role: true } });
   const renewalOwner = members.find((m) => m.id === t.renewalOwnerUserId);
+  const shared = t.catalogToolId ? await sharedFindingsFor(prisma, user.districtId, t.catalogToolId) : [];
+  const others = isOwner(user)
+    ? await prisma.districtTool.findMany({ where: { districtId: user.districtId, archivedAt: null, id: { not: t.id } }, select: { id: true, rawName: true }, orderBy: { rawName: "asc" } })
+    : [];
+  const FINDING_WORDS: Record<string, [string, string, string]> = {
+    usedForTraining: ["Student content used for training", "Yes", "No"],
+    trainingAddressed: ["Agreement addresses training", "Yes", "No"],
+  };
 
   return (
     <Shell user={user} title={t.rawName}>
-      <p className="sans"><Link href="/inventory">← Inventory</Link> · <span className="status">{t.decision.toUpperCase()}</span> · agreement: <b>{t.agreementStatus.replace(/_/g, " ")}</b> · AI status: <b>{t.aiStatus.replace(/_/g, " ")}</b> · {t.inUse ? "in use" : "not in use"} · from: <b>{t.source === "request" ? "staff request" : t.source}</b></p>
+      <p className="sans"><Link href="/inventory">← Inventory</Link> · <span className="status" data-s={t.decision}>{t.decision.toUpperCase()}</span> · agreement: <b>{t.agreementStatus.replace(/_/g, " ")}</b> · AI status: <b>{t.aiStatus.replace(/_/g, " ")}</b> · {t.inUse ? "in use" : "not in use"} · from: <b>{t.source === "request" ? "staff request" : t.source}</b></p>
+
+      {t.archivedAt && <div className="alert stale"><b>Archived on {t.archivedAt.toISOString().slice(0, 10)}.</b> This tool is out of the inventory, the draft, and every packet. Its history is kept below.</div>}
+      {(t.limitText || t.teacherGuidance) && (
+        <div className="card sans"><b>What teachers see</b>{t.limitText ? <p><b>Limit:</b> {t.limitText}</p> : null}{t.teacherGuidance ? <p>{t.teacherGuidance}</p> : null}</div>
+      )}
 
       <h2>AI exhibit {cat ? `(catalog: ${cat.name})` : "(district-only tool)"}</h2>
       <div className="exhibit-grid sans">
@@ -112,6 +133,26 @@ export default async function ToolPage({ params }: { params: Promise<{ id: strin
         <div>Source</div><div>{cat?.sourceUrl ? <a href={cat.sourceUrl}>vendor page</a> : <span className="unknown">Unknown</span>}</div>
       </div>
       <p className="hint sans">Unknown is a valid state. Catalog rows are read-only; anything marked <b>Our finding</b> is this district&apos;s own record and wins over the catalog.</p>
+
+      {shared.length > 0 && (
+        <>
+          <h2>Reported by other districts ({shared.length})</h2>
+          <p className="hint sans">Other districts chose to share these cited findings. They are not part of your record and do not change your rubric until you accept one. Check the source first.</p>
+          <table className="sans"><thead><tr><th>Finding</th><th>Value</th><th>Source</th><th>Date</th><th className="no-print">Act</th></tr></thead>
+            <tbody>{shared.map((f) => (
+              <tr key={f.id}>
+                <td>{FINDING_WORDS[f.key]?.[0] ?? f.key}</td>
+                <td>{f.value ? "Yes" : "No"}</td>
+                <td><a href={f.citationUrl} rel="noreferrer noopener" target="_blank">{f.citationUrl}</a></td>
+                <td>{f.citationDate}</td>
+                <td className="no-print">{writable && (
+                  <form action={accept}><input type="hidden" name="findingId" value={f.id} /><button className="btn secondary" type="submit">Accept as our finding</button></form>
+                )}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </>
+      )}
 
       <h2>Rubric</h2>
       <div className="rubric sans">
@@ -158,7 +199,12 @@ export default async function ToolPage({ params }: { params: Promise<{ id: strin
             <label>Opt-out {txt("optOut", over.optOut)}</label>
             <label>Subprocessors {txt("subprocessors", over.subprocessors)}</label>
             <label>Will sign no-training addendum {txt("willSignAddendum", over.willSignAddendum)}</label>
-            <label>Local notes <textarea name="notes" rows={3} defaultValue={t.notes} /></label>
+            <label>Limit — required when the decision is limited (printed for teachers)
+              <input type="text" name="limitText" defaultValue={t.limitText} maxLength={500} placeholder="e.g. Grades 6–12 pilot classrooms only" /></label>
+            <label>Guidance for teachers (printed on the teacher card, guides, and public list)
+              <textarea name="teacherGuidance" rows={3} defaultValue={t.teacherGuidance} maxLength={1000} /></label>
+            <label>Internal council notes (never printed)
+              <textarea name="notes" rows={3} defaultValue={t.notes} /></label>
             <label>Agreement ends on <input type="text" name="agreementEndsOn" defaultValue={t.agreementEndsOn ? t.agreementEndsOn.toISOString().slice(0, 10) : ""} placeholder="YYYY-MM-DD (optional)" /></label>
             <label>Renewal owner <select name="renewalOwnerUserId" defaultValue={t.renewalOwnerUserId ?? ""}>
               <option value="">— none —</option>
@@ -188,6 +234,30 @@ export default async function ToolPage({ params }: { params: Promise<{ id: strin
         </>
       ) : <div className="alert">Your role is read-only.</div>}
 
+      {isOwner(user) && (
+        <>
+          <h2>Housekeeping (owner)</h2>
+          <form action={rename} className="sans no-print">
+            <label>Rename this tool <input type="text" name="name" defaultValue={t.rawName} maxLength={200} required /></label>
+            <button className="btn secondary" type="submit">Rename</button>
+          </form>
+          {others.length > 0 && (
+            <form action={merge} className="sans no-print">
+              <label>Merge a duplicate into this tool <select name="dropId" required defaultValue="">
+                <option value="" disabled>Pick the duplicate</option>
+                {others.map((o) => <option key={o.id} value={o.id}>{o.rawName}</option>)}
+              </select></label>
+              <p className="hint">The duplicate&apos;s requests, agreements, comments, and history move here. Then the duplicate row is removed. This cannot be undone.</p>
+              <button className="btn secondary" type="submit">Merge and remove the duplicate</button>
+            </form>
+          )}
+          <form action={archive} className="sans no-print">
+            <p className="hint">{t.archivedAt ? "Restoring puts this tool back in the inventory and the draft." : "Archiving takes this tool out of the inventory, the draft, and every packet. Its history is kept and it can be restored."}</p>
+            <button className="btn secondary" type="submit">{t.archivedAt ? "Restore this tool" : "Archive this tool"}</button>
+          </form>
+        </>
+      )}
+
       <h2>Requested by ({t.requests.length})</h2>
       {t.requests.length ? (
         <table className="sans"><tr><th>Name</th><th>Email</th><th>Building</th><th>Students?</th><th>Note</th><th>When</th></tr>
@@ -210,7 +280,7 @@ export default async function ToolPage({ params }: { params: Promise<{ id: strin
                 <td>{a.uploadedBy}</td>
                 <td>{isPointer ? (
                   <>{pa.registryUrl ? <a href={pa.registryUrl}>{pa.registryUrl}</a> : "—"}{pa.registryId ? <> · {pa.registryId}</> : null}{pa.originator ? <> · {pa.originator}</> : null}</>
-                ) : <code>{a.blobKey}</code>}</td>
+                ) : <a href={`/agreements/file/${a.id}`}>Download</a>}</td>
               </tr>
             );
           })}

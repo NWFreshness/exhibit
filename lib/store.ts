@@ -22,8 +22,26 @@ export async function putBlob(
 ): Promise<{ key: string; url: string }> {
   if (process.env.BLOB_READ_WRITE_TOKEN) {
     const { put } = await import("@vercel/blob");
-    const res = await put(key, content, { access: "public", contentType, addRandomSuffix: false });
-    return { key, url: res.url };
+    // This SDK version has no private access, so the random suffix is what
+    // keeps a contract from being guessed. Staff reach it via /agreements/file/[id].
+    const res = await put(key, content, { access: "public", contentType, addRandomSuffix: true });
+    return { key: res.pathname, url: res.url };
   }
   return localPut(key, content);
+}
+
+/** Where a stored file can be read from: a redirect URL in production, the
+ *  bytes themselves on the dev local-disk fallback. Null when it is gone. */
+export async function readBlob(key: string): Promise<{ url: string } | { bytes: Buffer } | null> {
+  try {
+    if (process.env.BLOB_READ_WRITE_TOKEN) {
+      const { head } = await import("@vercel/blob");
+      return { url: (await head(key)).url };
+    }
+    const full = path.join(LOCAL_DIR, key);
+    if (!full.startsWith(LOCAL_DIR + path.sep)) return null;
+    return { bytes: await fs.readFile(full) };
+  } catch {
+    return null;
+  }
 }
